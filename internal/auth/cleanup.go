@@ -88,24 +88,15 @@ func RunAllCleanups() {
 	}
 }
 
-// --- テスト用の seam ---
+// resetFunc / cleanupFunc は handleCleanupSignal の引数の取り違えを**コンパイルエラー**にする。
 //
-// 🚨 production では常に既定値のまま。テストからしか差し替えない。
-// これを置いているのは、下の 3 つが守っている性質が**実環境では決定論的に作れない**ため:
-//
-//	currentUID     他ユーザー所有の作業領域を作るには別アカウントが要る
-//	afterLstatHook 「検証中の差し替え」は実時間のレースなので再現できない
-//	signalReset    「後始末の最中に 2 発目のシグナル」は壁時計に依存する
-//
-// seam が無いと、この 3 つは**永久に無検査**のまま残る（実際に 3 周のレビューで
-// 「無検査である」と指摘され続けた）。seam は守りたい窓の**内側**に置くこと
-// （窓の手前にしか割り込めない seam では、変異が全部緑で通る）。
-var (
-	currentUID = os.Getuid
-	// afterLstatHook は Lstat と OpenRoot の間＝差し替えの窓の内側で呼ばれる。
-	afterLstatHook func(name string)
-	// signalReset はシグナルの扱いを OS 既定へ戻す。
-	signalReset = func() { signal.Reset(cleanupSignals...) }
+// 🚨 素の func() のままだと、callsite で reset と cleanup を入れ替えても
+// build も全テストも通った（実測）。順序が本質なのに、順序を決める callsite が
+// 無検査だった。**callsite で明示変換する**こと（パラメータの型を名前付きにするだけでは、
+// 無名の func() から両方へ代入できてしまい効かない）。
+type (
+	resetFunc   func()
+	cleanupFunc func()
 )
 
 // cleanupSignals は②が捕まえるシグナル。
@@ -134,7 +125,10 @@ func InstallCleanupOnSignal() {
 	signal.Notify(ch, cleanupSignals...)
 	go func() {
 		sig := <-ch
-		handleCleanupSignal(sig, signalReset, RunAllCleanups, os.Exit)
+		handleCleanupSignal(sig,
+			resetFunc(func() { signal.Reset(cleanupSignals...) }),
+			cleanupFunc(RunAllCleanups),
+			os.Exit)
 	}()
 }
 
@@ -143,7 +137,7 @@ func InstallCleanupOnSignal() {
 // 🚨 **順序が本質**: 先に既定へ戻してから後始末する。逆にすると、後始末が長引いている間
 // どのシグナルでも止められなくなる（Ctrl-C を連打しても効かず、SIGQUIT の脱出口も塞がる）。
 // 依存を引数で受けるのは、その順序を実シグナル無しで検査できるようにするため。
-func handleCleanupSignal(sig os.Signal, reset func(), cleanup func(), exit func(int)) {
+func handleCleanupSignal(sig os.Signal, reset resetFunc, cleanup cleanupFunc, exit func(int)) {
 	reset()
 	cleanup()
 	if s, ok := sig.(syscall.Signal); ok {
@@ -219,7 +213,7 @@ func tempRoot() string {
 //
 // ディレクトリかどうかは別途見ない — 通常ファイルに対して OpenRoot が
 // "not a directory" を返すため（実測）。冗長な検査は置かない。
-func openVerifiedChild(parent *os.Root, name, display string) (*os.Root, error) {
+func openVerifiedChild(parent *os.Root, name, display string, uid int, afterLstat func(string)) (*os.Root, error) {
 	// Lstat なのでシンボリックリンクを追わない（追ってから調べたのでは遅い）。
 	want, err := parent.Lstat(name)
 	if err != nil {
@@ -228,8 +222,8 @@ func openVerifiedChild(parent *os.Root, name, display string) (*os.Root, error) 
 	if want.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s がシンボリックリンクです（削除してください）: %s", name, display)
 	}
-	if afterLstatHook != nil {
-		afterLstatHook(name) // テストが「検証中の差し替え」を再現するための窓
+	if afterLstat != nil {
+		afterLstat(name) // テストが「検証中の差し替え」を再現するための窓
 	}
 	child, err := parent.OpenRoot(name)
 	if err != nil {
@@ -244,12 +238,16 @@ func openVerifiedChild(parent *os.Root, name, display string) (*os.Root, error) 
 		_ = child.Close()
 		return nil, fmt.Errorf("%s が検証中に差し替えられました: %s", name, display)
 	}
+	// 🚨 実測（darwin / os パッケージ由来の FileInfo）ではこの分岐に到達しない
+	// （動的型は常に *syscall.Stat_t）。つまりテストでは守れない。それでも
+	// 「判定不能なら拒否」を置くのは、別 platform・別実装で型が変わったときに
+	// 黙って素通りさせないため。テストが無いことを承知で残している。
 	st, ok := got.Sys().(*syscall.Stat_t)
 	if !ok {
 		_ = child.Close()
 		return nil, fmt.Errorf("%s の所有者を判定できません: %s", name, display)
 	}
-	if int(st.Uid) != currentUID() {
+	if int(st.Uid) != uid {
 		_ = child.Close()
 		return nil, fmt.Errorf("%s の所有者が自分ではありません（削除してください）: %s", name, display)
 	}
@@ -266,6 +264,16 @@ func openVerifiedChild(parent *os.Root, name, display string) (*os.Root, error) 
 // （~/Library/Caches/slack-cli）を差し替えれば、検証済みの root ごと任意の場所へ移せる。
 // os.UserCacheDir() を起点に 1 コンポーネントずつ降りる。
 func openVerifiedTempRoot() (*os.Root, error) {
+	return openVerifiedTempRootWith(os.Getuid(), nil)
+}
+
+// openVerifiedTempRootWith は所有者として扱う uid と、検証中に割り込む関数を受ける。
+//
+// 🚨 テスト専用の引数だが、**グローバル変数にはしない**。パッケージ変数の seam は
+// (a) 同期が無いので、シグナル経路をインプロセスで検査した瞬間にデータレースになる
+// (b) 「seam を消す正当な整理」が変異検証で赤くなり、red が退行の証拠として読めなくなる
+// という 2 つの穴を作る（どちらも実測で確認）。引数ならどちらも構造的に起きない。
+func openVerifiedTempRootWith(uid int, afterLstat func(string)) (*os.Root, error) {
 	base, err := os.UserCacheDir()
 	if err != nil {
 		return nil, fmt.Errorf("キャッシュディレクトリを決められません: %w", err)
@@ -277,8 +285,12 @@ func openVerifiedTempRoot() (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 🚨 display はホップごとに進める。進めないと 2 ホップ目のエラーが
+	// 実在しないパスを表示し、差し替えを報告する画面が嘘をつく。
+	path := base
 	for _, name := range []string{tempRootParentName, tempRootName} {
-		child, err := openVerifiedChild(r, name, filepath.Join(base, name))
+		path = filepath.Join(path, name)
+		child, err := openVerifiedChild(r, name, path, uid, afterLstat)
 		_ = r.Close() // 子は自前の fd を持つので、親は閉じてよい
 		if err != nil {
 			return nil, err
@@ -338,7 +350,12 @@ func ensureTempRoot() (string, error) {
 // SweepStaleTempDirs は③。過去の実行が SIGKILL 等で残したものだけを消す。
 // 条件に 1 つでも合わなければ触らない（判断できないものは残す方へ倒す）。
 func SweepStaleTempDirs() {
-	r, err := openVerifiedTempRoot()
+	sweepStaleTempDirs(os.Getuid(), nil)
+}
+
+// sweepStaleTempDirs は SweepStaleTempDirs の引数版（テストが所有者と割り込みを差し替える）。
+func sweepStaleTempDirs(uid int, afterLstat func(string)) {
+	r, err := openVerifiedTempRootWith(uid, afterLstat)
 	if err != nil {
 		// 存在しない = まだ何も残していない（正常）。それ以外は検証に失敗したということなので、
 		// **1 件も消さずに**黙って引き下がる。ただし沈黙はしない（何が起きたか分からなくなる）。

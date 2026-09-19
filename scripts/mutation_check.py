@@ -24,7 +24,16 @@
      （rc だけ・件数だけでは「1 本も走らなかった」と区別できない）
   4. 作業ツリーは触らず、リポジトリのコピーに対して変異を当てる
 
+🚨 **red は「その変異でそのテストが落ちた」以上のことを意味しない。**
+どの assert が落ちたかまでは見ていないので、「seam を消す正当な整理」のような
+挙動中立の変更も red になりうる。red を「そのガードが効いている証拠」として読むなら、
+少なくとも 1 度は `-v` で**意図した assert が落ちているか**を目視すること。
+
 ## 意図的に載せていない変異（等価変異と判定したもの）
+
+- `openVerifiedChild` の `!ok`（型アサーション失敗）分岐を fail-open にする変異 — **等価変異**。
+  実測（darwin / os パッケージ由来の FileInfo）ではこの分岐に到達しない（動的型は常に
+  `*syscall.Stat_t`）。テストでは守れないので、コード側にその旨を書いてある。
 
 - `RunAllCleanups` の `filepath.Dir(p) != root` ガードの削除 — **等価変異**。
   到達経路を数え直した結果、削除は `removeVerified` が検証済み root からの相対名で行うため、
@@ -166,8 +175,8 @@ MUTATIONS = [
      "./internal/auth/", "TestSignalCleanupRemovesTempDirs"),
 
     ("③の掃除が検証を通らずに root を開く（symlink 先を消す形に戻す）", "internal/auth/cleanup.go",
-     '\tr, err := openVerifiedTempRoot()\n\tif err != nil {\n\t\t// 存在しない = まだ何も残していない（正常）。',
-     '\tr, err := os.OpenRoot(tempRoot())\n\tif err != nil {\n\t\t// 存在しない = まだ何も残していない（正常）。',
+     '\tr, err := openVerifiedTempRootWith(uid, afterLstat)',
+     '\t_ = uid\n\t_ = afterLstat\n\tr, err := os.OpenRoot(tempRoot())',
      "./internal/auth/", "TestSweepRefusesUnverifiedRoot"),
 
     ("③の掃除を main から外す（資格情報の経路でしか走らない形に戻す）", "cmd/slack/main.go",
@@ -192,8 +201,8 @@ MUTATIONS = [
      "./internal/auth/", "TestSweepRemovesOnlyDeadOwnDirs"),
 
     ("作業領域の symlink 検査と同一性検査を両方外す", "internal/auth/cleanup.go",
-     '\tif want.Mode()&os.ModeSymlink != 0 {\n\t\treturn nil, fmt.Errorf("%s がシンボリックリンクです（削除してください）: %s", name, display)\n\t}\n\tif afterLstatHook != nil {\n\t\tafterLstatHook(name) // テストが「検証中の差し替え」を再現するための窓\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n\tif !os.SameFile(want, got) {\n\t\t_ = child.Close()\n\t\treturn nil, fmt.Errorf("%s が検証中に差し替えられました: %s", name, display)\n\t}\n',
-     '\t_ = want\n\n\tif afterLstatHook != nil {\n\t\tafterLstatHook(name)\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n',
+     '\tif want.Mode()&os.ModeSymlink != 0 {\n\t\treturn nil, fmt.Errorf("%s がシンボリックリンクです（削除してください）: %s", name, display)\n\t}\n\tif afterLstat != nil {\n\t\tafterLstat(name) // テストが「検証中の差し替え」を再現するための窓\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n\tif !os.SameFile(want, got) {\n\t\t_ = child.Close()\n\t\treturn nil, fmt.Errorf("%s が検証中に差し替えられました: %s", name, display)\n\t}\n\t// 🚨 実測（darwin / os パッケージ由来の FileInfo）ではこの分岐に到達しない\n\t// （動的型は常に *syscall.Stat_t）。つまりテストでは守れない。それでも\n\t// 「判定不能なら拒否」を置くのは、別 platform・別実装で型が変わったときに\n\t// 黙って素通りさせないため。テストが無いことを承知で残している。\n',
+     '\t_ = want\n\n\tif afterLstat != nil {\n\t\tafterLstat(name)\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n',
      "./internal/auth/", "TestSweepRefusesRelativeSymlinkRoot"),
 
     ("①の後始末をパス文字列の os.RemoveAll に戻す", "internal/auth/cleanup.go",
@@ -202,8 +211,8 @@ MUTATIONS = [
      "./internal/auth/", "TestDeferCleanupRefusesUnverifiedRoot"),
 
     ("親ディレクトリの検証を省いて末尾だけ検証する", "internal/auth/cleanup.go",
-     '\tr, err := os.OpenRoot(base)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tfor _, name := range []string{tempRootParentName, tempRootName} {\n\t\tchild, err := openVerifiedChild(r, name, filepath.Join(base, name))\n\t\t_ = r.Close() // 子は自前の fd を持つので、親は閉じてよい\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tr = child\n\t}\n',
-     '\tr, err := os.OpenRoot(filepath.Join(base, tempRootParentName))\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tchild, err := openVerifiedChild(r, tempRootName, tempRoot())\n\t_ = r.Close()\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tr = child\n',
+     '\tr, err := os.OpenRoot(base)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\t// 🚨 display はホップごとに進める。進めないと 2 ホップ目のエラーが\n\t// 実在しないパスを表示し、差し替えを報告する画面が嘘をつく。\n\tpath := base\n\tfor _, name := range []string{tempRootParentName, tempRootName} {\n\t\tpath = filepath.Join(path, name)\n\t\tchild, err := openVerifiedChild(r, name, path, uid, afterLstat)\n\t\t_ = r.Close() // 子は自前の fd を持つので、親は閉じてよい\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tr = child\n\t}\n',
+     '\tr, err := os.OpenRoot(filepath.Join(base, tempRootParentName))\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tchild, err := openVerifiedChild(r, tempRootName, tempRoot(), uid, afterLstat)\n\t_ = r.Close()\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tr = child\n',
      "./internal/auth/", "TestParentComponentIsVerified"),
 
 
@@ -242,8 +251,8 @@ MUTATIONS = [
      '\tfs.SetOutput(os.Stderr)\n\t_ = io.Discard\n\tfs.Usage = func() { fmt.Fprint(os.Stderr, "usage") }',
      "./cmd/slack/", "TestHelpIsPrintedOnce"),
     ("所有者(uid)の確認を外す", "internal/auth/cleanup.go",
-     '\tif int(st.Uid) != currentUID() {',
-     '\tif false && int(st.Uid) != currentUID() {',
+     '\tif int(st.Uid) != uid {',
+     '\tif false && int(st.Uid) != uid {',
      "./internal/auth/", "TestForeignOwnerIsRejected"),
 
     ("検証中の差し替え検出(SameFile)を外す", "internal/auth/cleanup.go",
@@ -261,7 +270,24 @@ MUTATIONS = [
      '\t_ = reset\n\tcleanup()',
      "./internal/auth/", "TestSignalHandlerResetsBeforeCleanup"),
 
+    ("シグナルハンドラに no-op の reset を渡す", "internal/auth/cleanup.go",
+     '\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),',
+     '\t\t\tresetFunc(func() {}),',
+     "./internal/auth/", "TestSignalHandlerPassesRealReset"),
+
 ]
+
+# COMPILE_GUARDED は「型で閉じている」ことを確かめる変異。
+#
+# 🚨 こちらは red ではなく **build-error が期待値**。テストで守るのではなく
+# コンパイラで守っている性質なので、判定の向きが逆になる。
+# （名前: ファイル, 置換前, 置換後）
+COMPILE_GUARDED = [
+    ("シグナルハンドラの reset と cleanup を入れ替える", "internal/auth/cleanup.go",
+     '\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),\n\t\t\tcleanupFunc(RunAllCleanups),',
+     '\t\t\tcleanupFunc(RunAllCleanups),\n\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),'),
+]
+
 
 def run(cmd, cwd):
     p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True)
@@ -324,6 +350,22 @@ def main():
                 else:
                     verdict, detail = "red(別要因の可能性)", combined.strip().splitlines()[-1][:160]
                 results.append((name, verdict, detail))
+            finally:
+                open(full, "w", encoding="utf-8").write(src)
+        # 型で閉じている性質: 変異がコンパイルエラーになることを確かめる
+        for name, path, old, new in COMPILE_GUARDED:
+            full = os.path.join(root, path)
+            src = open(full, encoding="utf-8").read()
+            if src.count(old) != 1:
+                results.append((name, "not-applied", f"置換対象が {src.count(old)} 箇所（1 箇所であるべき）"))
+                continue
+            open(full, "w", encoding="utf-8").write(src.replace(old, new, 1))
+            try:
+                rc, out, err = run("go build ./...", root)
+                if rc != 0:
+                    results.append((name, "red", "コンパイルエラー（型で閉じている）"))
+                else:
+                    results.append((name, "GREEN", "コンパイルが通ってしまう（型で閉じていない）"))
             finally:
                 open(full, "w", encoding="utf-8").write(src)
     finally:

@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -510,33 +513,14 @@ func TestForeignOwnerIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig := currentUID
-	currentUID = func() int { return orig() + 1 } // 自分以外の所有に見せる
-	t.Cleanup(func() { currentUID = orig })
+	foreign := os.Getuid() + 1 // 自分以外の所有として扱う
 
-	if _, err := openVerifiedTempRoot(); err == nil {
+	if _, err := openVerifiedTempRootWith(foreign, nil); err == nil {
 		t.Error("所有者が自分でない作業領域を受け入れてはいけない")
 	}
-	SweepStaleTempDirs()
+	sweepStaleTempDirs(foreign, nil)
 	if _, err := os.Stat(stale); err != nil {
 		t.Errorf("所有者を確認できない領域の中身を削除した: %v", err)
-	}
-}
-
-// 🚨 所有者を判定できないとき（型アサーション失敗）は拒否すること（fail-closed）。
-//
-// 判定不能を「自分のもの」に丸めると、確認できていないものを消しにいくことになる。
-func TestOwnerCheckFailsClosed(t *testing.T) {
-	isolateTemp(t)
-	if _, err := ensureTempRoot(); err != nil {
-		t.Fatal(err)
-	}
-	// currentUID が「ありえない値」を返す = 一致しない → 拒否される、が期待。
-	orig := currentUID
-	currentUID = func() int { return -1 }
-	t.Cleanup(func() { currentUID = orig })
-	if _, err := openVerifiedTempRoot(); err == nil {
-		t.Error("所有者が一致しないのに受け入れた")
 	}
 }
 
@@ -561,7 +545,7 @@ func TestSwapDuringVerificationIsDetected(t *testing.T) {
 	}
 
 	swapped := false
-	afterLstatHook = func(name string) {
+	hook := func(name string) {
 		if name != tempRootName || swapped {
 			return
 		}
@@ -575,9 +559,7 @@ func TestSwapDuringVerificationIsDetected(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	t.Cleanup(func() { afterLstatHook = nil })
-
-	_, err := openVerifiedTempRoot()
+	_, err := openVerifiedTempRootWith(os.Getuid(), hook)
 	if !swapped {
 		t.Fatal("seam が呼ばれていない（窓の内側に無い）")
 	}
@@ -586,6 +568,52 @@ func TestSwapDuringVerificationIsDetected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "差し替え") {
 		t.Errorf("差し替えだと分かるメッセージにすべき: %v", err)
+	}
+}
+
+// 🚨 親ホップ（slack-cli）の差し替えも検出すること。
+//
+// 検証は 2 ホップあるのに、テストは子（extract）しか駆動していなかった。
+// 同じコードを通るとはいえ、「検証済み」と言えるのは駆動した側だけ。
+func TestSwapOfParentHopIsDetected(t *testing.T) {
+	parent := isolateTemp(t)
+	if _, err := ensureTempRoot(); err != nil {
+		t.Fatal(err)
+	}
+	// 親（slack-cli）と同じ形の別ディレクトリを用意しておく。
+	decoy := filepath.Join(filepath.Dir(parent), "decoy")
+	if err := os.MkdirAll(filepath.Join(decoy, tempRootName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	swapped := false
+	hook := func(name string) {
+		if name != tempRootParentName || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(parent, filepath.Join(filepath.Dir(parent), "moved-away")); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(decoy, parent); err != nil {
+			t.Error(err)
+		}
+	}
+
+	_, err := openVerifiedTempRootWith(os.Getuid(), hook)
+	if !swapped {
+		t.Fatal("親ホップで seam が呼ばれていない")
+	}
+	if err == nil {
+		t.Fatal("親ディレクトリが差し替えられたのに受け入れた")
+	}
+	if !strings.Contains(err.Error(), "差し替え") {
+		t.Errorf("差し替えだと分かるメッセージにすべき: %v", err)
+	}
+	// エラーメッセージが実在するパスを指すこと（display をホップごとに進める）。
+	if !strings.Contains(err.Error(), parent) {
+		t.Errorf("エラーが実在しないパスを指している: %v（%s を含むべき）", err, parent)
 	}
 }
 
@@ -598,8 +626,8 @@ func TestSignalHandlerResetsBeforeCleanup(t *testing.T) {
 	exited := 0
 	handleCleanupSignal(
 		syscall.SIGINT,
-		func() { order = append(order, "reset") },
-		func() { order = append(order, "cleanup") },
+		resetFunc(func() { order = append(order, "reset") }),
+		cleanupFunc(func() { order = append(order, "cleanup") }),
 		func(code int) { order = append(order, "exit"); exited = code },
 	)
 	if strings.Join(order, ",") != "reset,cleanup,exit" {
@@ -611,5 +639,58 @@ func TestSignalHandlerResetsBeforeCleanup(t *testing.T) {
 	// exit は 1 回だけ（os.Exit は戻らないが、戻る実装で二重に呼ばない）。
 	if n := strings.Count(strings.Join(order, ","), "exit"); n != 1 {
 		t.Errorf("exit の呼び出しが %d 回", n)
+	}
+}
+
+// 🚨 シグナルハンドラへ渡す reset が、本当に signal.Reset を呼ぶこと。
+//
+// 型（resetFunc / cleanupFunc）は**引数の取り違え**をコンパイルエラーにするが、
+// 「reset のスロットに no-op を渡す」形は型では止まらず、既存のテストも全部緑になる（実測）。
+// 実挙動で検査するには「後始末が長引いている間に 2 発目のシグナル」を作る必要があり、
+// それは壁時計依存かつ新しいグローバル seam を要求する（消したばかりのもの）。
+//
+// # このゲートの脅威モデル
+//
+// 止めるもの: **うっかり**（リファクタ・整理・マージ事故で signal.Reset が落ちる）。
+// 止めないもの: 意図的な迂回（別名の関数に包む / 動的に組み立てる / 別 API で同じことをする）。
+// 意味論の正しさ（Reset が実際に効くか）は OS の仕様であり、ここでは検査しない。
+func TestSignalHandlerPassesRealReset(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "cleanup.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "handleCleanupSignal" || len(call.Args) < 2 {
+			return true
+		}
+		found = true
+		// 第 2 引数（reset）の中に signal.Reset の呼び出しがあること。
+		hasReset := false
+		ast.Inspect(call.Args[1], func(m ast.Node) bool {
+			sel, ok := m.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Reset" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "signal" {
+				hasReset = true
+			}
+			return true
+		})
+		if !hasReset {
+			t.Error("handleCleanupSignal の reset 引数が signal.Reset を呼んでいない" +
+				"（後始末が長引いている間、2 発目のシグナルで止められなくなる）")
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("handleCleanupSignal の呼び出しが見つからない（走査が壊れている）")
 	}
 }
