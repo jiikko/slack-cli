@@ -88,6 +88,26 @@ func RunAllCleanups() {
 	}
 }
 
+// --- テスト用の seam ---
+//
+// 🚨 production では常に既定値のまま。テストからしか差し替えない。
+// これを置いているのは、下の 3 つが守っている性質が**実環境では決定論的に作れない**ため:
+//
+//	currentUID     他ユーザー所有の作業領域を作るには別アカウントが要る
+//	afterLstatHook 「検証中の差し替え」は実時間のレースなので再現できない
+//	signalReset    「後始末の最中に 2 発目のシグナル」は壁時計に依存する
+//
+// seam が無いと、この 3 つは**永久に無検査**のまま残る（実際に 3 周のレビューで
+// 「無検査である」と指摘され続けた）。seam は守りたい窓の**内側**に置くこと
+// （窓の手前にしか割り込めない seam では、変異が全部緑で通る）。
+var (
+	currentUID = os.Getuid
+	// afterLstatHook は Lstat と OpenRoot の間＝差し替えの窓の内側で呼ばれる。
+	afterLstatHook func(name string)
+	// signalReset はシグナルの扱いを OS 既定へ戻す。
+	signalReset = func() { signal.Reset(cleanupSignals...) }
+)
+
 // cleanupSignals は②が捕まえるシグナル。
 var cleanupSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}
 
@@ -114,21 +134,23 @@ func InstallCleanupOnSignal() {
 	signal.Notify(ch, cleanupSignals...)
 	go func() {
 		sig := <-ch
-		// 🚨 受け取ったら即座に既定動作へ戻す。ハンドラは 1 回しか読まないので、
-		// ここで戻さないと**後始末が長引いている間、どのシグナルでも止められなくなる**
-		// （Ctrl-C を連打しても効かず、SIGQUIT による脱出口も塞がる。実測で踏んだ）。
-		// 戻したあとは「1 発目 = 後始末して終了 / 2 発目 = OS 既定」になる。
-		// 🚨 ただし 2 発目で必ず止まるとは限らない。起動時に SIGINT が SIG_IGN で
-		// 継承されていると（`&` によるバックグラウンド起動・cron・CI）、Reset は
-		// その無視を復元するので SIGINT では止まらない（実測）。端末から起動した
-		// 場合は Ctrl-C の 2 発目で止まる。
-		signal.Reset(cleanupSignals...)
-		RunAllCleanups()
-		if s, ok := sig.(syscall.Signal); ok {
-			os.Exit(128 + int(s)) // シェルの慣習（SIGINT=130 / SIGTERM=143）
-		}
-		os.Exit(1)
+		handleCleanupSignal(sig, signalReset, RunAllCleanups, os.Exit)
 	}()
+}
+
+// handleCleanupSignal は②の本体。
+//
+// 🚨 **順序が本質**: 先に既定へ戻してから後始末する。逆にすると、後始末が長引いている間
+// どのシグナルでも止められなくなる（Ctrl-C を連打しても効かず、SIGQUIT の脱出口も塞がる）。
+// 依存を引数で受けるのは、その順序を実シグナル無しで検査できるようにするため。
+func handleCleanupSignal(sig os.Signal, reset func(), cleanup func(), exit func(int)) {
+	reset()
+	cleanup()
+	if s, ok := sig.(syscall.Signal); ok {
+		exit(128 + int(s)) // シェルの慣習（SIGINT=130 / SIGTERM=143）
+		return
+	}
+	exit(1)
 }
 
 // 作業領域は ~/Library/Caches/slack-cli/extract。
@@ -206,6 +228,9 @@ func openVerifiedChild(parent *os.Root, name, display string) (*os.Root, error) 
 	if want.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s がシンボリックリンクです（削除してください）: %s", name, display)
 	}
+	if afterLstatHook != nil {
+		afterLstatHook(name) // テストが「検証中の差し替え」を再現するための窓
+	}
 	child, err := parent.OpenRoot(name)
 	if err != nil {
 		return nil, err
@@ -224,7 +249,7 @@ func openVerifiedChild(parent *os.Root, name, display string) (*os.Root, error) 
 		_ = child.Close()
 		return nil, fmt.Errorf("%s の所有者を判定できません: %s", name, display)
 	}
-	if int(st.Uid) != os.Getuid() {
+	if int(st.Uid) != currentUID() {
 		_ = child.Close()
 		return nil, fmt.Errorf("%s の所有者が自分ではありません（削除してください）: %s", name, display)
 	}

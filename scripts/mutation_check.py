@@ -192,8 +192,8 @@ MUTATIONS = [
      "./internal/auth/", "TestSweepRemovesOnlyDeadOwnDirs"),
 
     ("作業領域の symlink 検査と同一性検査を両方外す", "internal/auth/cleanup.go",
-     '\tif want.Mode()&os.ModeSymlink != 0 {\n\t\treturn nil, fmt.Errorf("%s がシンボリックリンクです（削除してください）: %s", name, display)\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n\tif !os.SameFile(want, got) {\n\t\t_ = child.Close()\n\t\treturn nil, fmt.Errorf("%s が検証中に差し替えられました: %s", name, display)\n\t}\n',
-     '\t_ = want\n\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n',
+     '\tif want.Mode()&os.ModeSymlink != 0 {\n\t\treturn nil, fmt.Errorf("%s がシンボリックリンクです（削除してください）: %s", name, display)\n\t}\n\tif afterLstatHook != nil {\n\t\tafterLstatHook(name) // テストが「検証中の差し替え」を再現するための窓\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n\tif !os.SameFile(want, got) {\n\t\t_ = child.Close()\n\t\treturn nil, fmt.Errorf("%s が検証中に差し替えられました: %s", name, display)\n\t}\n',
+     '\t_ = want\n\n\tif afterLstatHook != nil {\n\t\tafterLstatHook(name)\n\t}\n\tchild, err := parent.OpenRoot(name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tgot, err := child.Stat(".")\n\tif err != nil {\n\t\t_ = child.Close()\n\t\treturn nil, err\n\t}\n',
      "./internal/auth/", "TestSweepRefusesRelativeSymlinkRoot"),
 
     ("①の後始末をパス文字列の os.RemoveAll に戻す", "internal/auth/cleanup.go",
@@ -223,8 +223,8 @@ MUTATIONS = [
      "./internal/auth/", "TestRelativeHomeIsRejected"),
 
     ("シグナルを受けても終了しない（後始末だけして走り続ける）", "internal/auth/cleanup.go",
-     '\t\tif s, ok := sig.(syscall.Signal); ok {\n\t\t\tos.Exit(128 + int(s)) // シェルの慣習（SIGINT=130 / SIGTERM=143）\n\t\t}\n\t\tos.Exit(1)',
-     '\t\t_ = sig',
+     '\tif s, ok := sig.(syscall.Signal); ok {\n\t\texit(128 + int(s)) // シェルの慣習（SIGINT=130 / SIGTERM=143）\n\t\treturn\n\t}\n\texit(1)',
+     '\t_ = sig\n\t_ = exit',
      "./internal/auth/", "TestSignalCleanupRemovesTempDirs"),
 
     ("作業領域を $TMPDIR 基準に戻す", "internal/auth/cleanup.go",
@@ -241,6 +241,26 @@ MUTATIONS = [
      '\tfs.SetOutput(io.Discard)\n\tfs.Usage = func() {}',
      '\tfs.SetOutput(os.Stderr)\n\t_ = io.Discard\n\tfs.Usage = func() { fmt.Fprint(os.Stderr, "usage") }',
      "./cmd/slack/", "TestHelpIsPrintedOnce"),
+    ("所有者(uid)の確認を外す", "internal/auth/cleanup.go",
+     '\tif int(st.Uid) != currentUID() {',
+     '\tif false && int(st.Uid) != currentUID() {',
+     "./internal/auth/", "TestForeignOwnerIsRejected"),
+
+    ("検証中の差し替え検出(SameFile)を外す", "internal/auth/cleanup.go",
+     '\tif !os.SameFile(want, got) {',
+     '\tif false && !os.SameFile(want, got) {',
+     "./internal/auth/", "TestSwapDuringVerificationIsDetected"),
+
+    ("シグナル受信後に後始末してから既定へ戻す（順序を逆にする）", "internal/auth/cleanup.go",
+     '\treset()\n\tcleanup()',
+     '\tcleanup()\n\treset()',
+     "./internal/auth/", "TestSignalHandlerResetsBeforeCleanup"),
+
+    ("シグナル受信後に既定へ戻さない", "internal/auth/cleanup.go",
+     '\treset()\n\tcleanup()',
+     '\t_ = reset\n\tcleanup()',
+     "./internal/auth/", "TestSignalHandlerResetsBeforeCleanup"),
+
 ]
 
 def run(cmd, cwd):

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -490,5 +491,125 @@ func TestProcessAliveGuardsNonPositivePID(t *testing.T) {
 	}
 	if !processAlive(os.Getpid()) {
 		t.Error("自分自身は生きている判定になるべき")
+	}
+}
+
+// 🚨 所有者が自分でない作業領域は使わないこと。
+//
+// 実環境では他ユーザー所有のディレクトリを作れないため、uid の取得を seam にして検査する。
+// seam が無いとこの検査は永久に無検査のまま残る（3 周の敵対的レビューで指摘され続けた）。
+func TestForeignOwnerIsRejected(t *testing.T) {
+	isolateTemp(t)
+	root, err := ensureTempRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 掃除の条件に合う残骸を置く（検査が効いていなければ消えるはず）。
+	stale := filepath.Join(root, strconv.Itoa(deadPID(t))+"-abc")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := currentUID
+	currentUID = func() int { return orig() + 1 } // 自分以外の所有に見せる
+	t.Cleanup(func() { currentUID = orig })
+
+	if _, err := openVerifiedTempRoot(); err == nil {
+		t.Error("所有者が自分でない作業領域を受け入れてはいけない")
+	}
+	SweepStaleTempDirs()
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("所有者を確認できない領域の中身を削除した: %v", err)
+	}
+}
+
+// 🚨 所有者を判定できないとき（型アサーション失敗）は拒否すること（fail-closed）。
+//
+// 判定不能を「自分のもの」に丸めると、確認できていないものを消しにいくことになる。
+func TestOwnerCheckFailsClosed(t *testing.T) {
+	isolateTemp(t)
+	if _, err := ensureTempRoot(); err != nil {
+		t.Fatal(err)
+	}
+	// currentUID が「ありえない値」を返す = 一致しない → 拒否される、が期待。
+	orig := currentUID
+	currentUID = func() int { return -1 }
+	t.Cleanup(func() { currentUID = orig })
+	if _, err := openVerifiedTempRoot(); err == nil {
+		t.Error("所有者が一致しないのに受け入れた")
+	}
+}
+
+// 🚨 Lstat した実体と、実際に開いた実体が違うなら拒否すること。
+//
+// 「名前を 2 回解決する」構造には必ず窓がある。実時間のレースは再現できないので、
+// 窓の内側（Lstat と OpenRoot の間）に seam を置いて決定論的に差し替える。
+func TestSwapDuringVerificationIsDetected(t *testing.T) {
+	parent := isolateTemp(t)
+	if _, err := ensureTempRoot(); err != nil {
+		t.Fatal(err)
+	}
+	// すり替え先（別 inode のディレクトリ）。中身は掃除の条件に合う形にしておく。
+	victim := filepath.Join(parent, "victim")
+	stale := filepath.Join(victim, strconv.Itoa(deadPID(t))+"-abc")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	important := filepath.Join(stale, "important.txt")
+	if err := os.WriteFile(important, []byte("消えてはいけない"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	swapped := false
+	afterLstatHook = func(name string) {
+		if name != tempRootName || swapped {
+			return
+		}
+		swapped = true
+		// 検証の途中で、同じ名前に別のディレクトリを置く。
+		if err := os.Rename(tempRoot(), filepath.Join(parent, "moved-away")); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(victim, tempRoot()); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterLstatHook = nil })
+
+	_, err := openVerifiedTempRoot()
+	if !swapped {
+		t.Fatal("seam が呼ばれていない（窓の内側に無い）")
+	}
+	if err == nil {
+		t.Fatal("検証中に差し替えられたのに受け入れた")
+	}
+	if !strings.Contains(err.Error(), "差し替え") {
+		t.Errorf("差し替えだと分かるメッセージにすべき: %v", err)
+	}
+}
+
+// 🚨 シグナル受信後の順序: 既定へ戻す → 後始末 → 終了。
+//
+// 逆順だと、後始末が長引いている間どのシグナルでも止められなくなる。
+// 実シグナルでは「後始末が長い」状況を壁時計なしに作れないので、順序そのものを検査する。
+func TestSignalHandlerResetsBeforeCleanup(t *testing.T) {
+	var order []string
+	exited := 0
+	handleCleanupSignal(
+		syscall.SIGINT,
+		func() { order = append(order, "reset") },
+		func() { order = append(order, "cleanup") },
+		func(code int) { order = append(order, "exit"); exited = code },
+	)
+	if strings.Join(order, ",") != "reset,cleanup,exit" {
+		t.Errorf("順序が違う: %v（reset,cleanup,exit であるべき）", order)
+	}
+	if exited != 128+int(syscall.SIGINT) {
+		t.Errorf("終了コード: got %d, want %d", exited, 128+int(syscall.SIGINT))
+	}
+	// exit は 1 回だけ（os.Exit は戻らないが、戻る実装で二重に呼ばない）。
+	if n := strings.Count(strings.Join(order, ","), "exit"); n != 1 {
+		t.Errorf("exit の呼び出しが %d 回", n)
 	}
 }
