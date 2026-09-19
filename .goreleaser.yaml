@@ -1,0 +1,35 @@
+# 【任意】ビルド済みバイナリを配り、tap の formula を自動更新する場合の雛形。
+# 使い方: git tag v0.1.0 && git push --tags → GitHub Actions で goreleaser を実行。
+#
+# 注意: GoReleaser はメジャーバージョンでスキーマ（特に homebrew 出力のキー名 brews/homebrew_casks）が
+#       変わることがある。適用前に `goreleaser check` と公式ドキュメントで最新のキー名を確認すること。
+version: 2
+
+builds:
+  - id: slack
+    main: ./cmd/slack
+    binary: slack
+    env: [CGO_ENABLED=0]      # modernc.org/sqlite は pure Go なので cgo 不要
+    goos: [darwin]            # Keychain / Chrome cookie 復号が macOS 前提
+    goarch: [arm64, amd64]
+    ldflags:
+      - -s -w
+
+archives:
+  - id: slack
+    formats: [tar.gz]
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - name: slack
+    repository:
+      owner: jiikko
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://github.com/jiikko/slack-cli"
+    description: "Slack を Chrome cookie 認証で読む読み取り専用 CLI"
+    license: "MIT"
+    test: |
+      assert_match "slack - ", shell_output("#{bin}/slack --help")

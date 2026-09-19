@@ -1,0 +1,12 @@
+# ビルド生成物
+/slack
+/dist/
+*.test
+*.out
+# セッション中の作業物（結論は issue / コードへ移す）
+/tmp/
+# セッションのロックファイル等
+.claude/
+
+# エディタ/OS
+.DS_Store

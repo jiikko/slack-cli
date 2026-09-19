@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    # 🚨 既定ブランチ名を取り違えると push で CI が一度も走らない（PR では走るので気づきにくい）。
+    # 現在の作業ブランチは master、兄弟 repo (esa-cli) は main。どちらでも走るようにしておく。
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    # macOS 専用のツールだが、ビルドは他 platform でも通す方針
+    # （keychain_other.go が「実行時に断る」形にしてあるため）。
+    # 両方で回すことで、platform 依存の取りこぼしを CI で拾う。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      - name: gofmt（整形漏れを検出）
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt が必要なファイル:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt: 整形済み"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      # 受け入れ基準 §12: CGO_ENABLED=0 でビルドできること
+      - name: build (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go build -o /tmp/slack-cli-build ./cmd/slack
+          ls -l /tmp/slack-cli-build
