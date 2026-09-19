@@ -25,8 +25,8 @@ $ slack whoami
 ## インストール
 
 ```sh
-# Homebrew（tap を用意している場合）
-brew install jiikko/tap/slack-cli
+# Homebrew
+brew install jiikko/tap/chrome-slack-cli
 
 # go install
 go install github.com/jiikko/slack-cli/cmd/slack@latest
@@ -36,6 +36,14 @@ CGO_ENABLED=0 go build -o slack ./cmd/slack
 ```
 
 macOS 専用。Chrome（Google Chrome）専用。
+
+> **formula 名が `chrome-slack-cli` なのは意図的です。** `slack-cli` は Homebrew 公式 cask
+> （Slack 社の [Slack CLI](https://docs.slack.dev/tools/slack-cli/)）と衝突するため、別名にしてあります。
+> インストールされるコマンド名は `slack` です。
+>
+> formula の正本は [jiikko/homebrew-tap](https://github.com/jiikko/homebrew-tap) の
+> `Formula/chrome-slack-cli.rb` **のみ**です（このリポジトリには写しを置きません。
+> 2 箇所に同じものがあると、片方だけ直したときに静かにずれるため）。
 
 ## セットアップ
 
