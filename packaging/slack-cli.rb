@@ -15,7 +15,10 @@ class SlackCli < Formula
   depends_on :macos
 
   def install
-    system "go", "build", *std_go_args(ldflags: "-s -w"), "./cmd/slack"
+    # 🚨 output: を明示する。std_go_args の既定は**バイナリ名 = formula 名**なので、
+    # 省くと slack-cli という名前で入り、README の `slack` コマンドが存在しなくなる
+    # （実際に踏んだ。formula 名とバイナリ名が違うときだけ出る）。
+    system "go", "build", *std_go_args(ldflags: "-s -w", output: bin/"slack"), "./cmd/slack"
   end
 
   test do
