@@ -201,6 +201,39 @@ func TestNoSecretsInStderrOrErrors(t *testing.T) {
 	check("エラーメッセージ(認証失敗)", err.Error())
 }
 
+// 🚨 プロファイルを固定しているときは「そのプロファイルしか探していない」ことを案内すること。
+//
+// これが無いと、見つかったワークスペースの一覧が「Chrome 全体を探した結果」に読め、
+// 別プロファイルにログインしている対象を「無い」と誤診する（実際に誤診した）。
+func TestFailureTellsProfileScopeWhenFixed(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// プロファイル固定 + 別ワークスペースのトークンしか無い
+	rt := &recordingTransport{handle: tokenAwareHandler(t)}
+	cfg := alphaConfig() // Profile: "Profile 1"
+	_, err := Resolve(context.Background(), cfg, credsWith(tokenForBeta), nil, withTransport(rt))
+	if err == nil {
+		t.Fatal("エラーになるはず")
+	}
+	for _, want := range []string{"Profile 1", "-profile auto", "slack setup"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("固定時の案内に %q が無い:\n%v", want, err)
+		}
+	}
+
+	// auto のときは「固定されているため」の案内を出さない（誤った誘導をしない）
+	rt2 := &recordingTransport{handle: tokenAwareHandler(t)}
+	autoCfg := cfg
+	autoCfg.Profile = auth.ProfileAuto
+	_, err = Resolve(context.Background(), autoCfg, credsWith(tokenForBeta), nil, withTransport(rt2))
+	if err == nil {
+		t.Fatal("エラーになるはず")
+	}
+	if strings.Contains(err.Error(), "-profile auto") {
+		t.Errorf("auto なのに -profile auto を勧めている:\n%v", err)
+	}
+}
+
 // workspace 未設定・不正値は使い方エラー（rc=2）にすること。
 func TestResolveRequiresValidWorkspace(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

@@ -148,7 +148,7 @@ func configSet(key, value string) error {
 // 接続が起きるのは workspace が確定した後の検証（auth.test）だけ。
 func configInit(args []string) error {
 	var cfg config.Config
-	fs := newFlagSet("config init", configHelp)
+	fs := newFlagSet("config init")
 	registerCommon(fs, &cfg)
 	if done, err := parseArgs(fs, configHelp, args); err != nil || done {
 		return err

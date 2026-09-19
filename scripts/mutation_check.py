@@ -232,8 +232,16 @@ MUTATIONS = [
      '\treturn filepath.Join(os.TempDir(), tempRootParentName), nil',
      "./internal/auth/", "TestTempRootIsToolSpecific"),
 
-]
+    ("プロファイル固定時の探索範囲の案内をやめる", "internal/slack/resolve.go",
+     '\tif !fixed || len(profiles) == 0 {\n\t\treturn ""\n\t}',
+     '\tif true || !fixed || len(profiles) == 0 {\n\t\treturn ""\n\t}',
+     "./internal/slack/", "TestFailureTellsProfileScopeWhenFixed"),
 
+    ("--help / フラグ誤りの出力を flag パッケージにも出させる（二重出力へ戻す）", "cmd/slack/main.go",
+     '\tfs.SetOutput(io.Discard)\n\tfs.Usage = func() {}',
+     '\tfs.SetOutput(os.Stderr)\n\t_ = io.Discard\n\tfs.Usage = func() { fmt.Fprint(os.Stderr, "usage") }',
+     "./cmd/slack/", "TestHelpIsPrintedOnce"),
+]
 
 def run(cmd, cwd):
     p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True)

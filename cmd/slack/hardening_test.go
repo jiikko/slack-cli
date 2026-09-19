@@ -6,6 +6,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -78,6 +80,64 @@ func TestBuildQueryPrefix(t *testing.T) {
 			t.Errorf("got %q, want %q", got, want)
 		}
 	}
+}
+
+// 🚨 --help は stdout へ 1 回だけ出ること。
+//
+// flag パッケージは ContinueOnError のとき、失敗時に自分でエラー文を Output へ書き、
+// さらに Usage を呼ぶ。既定のままだと help が 2 回（Usage 経由と parseArgs 経由）出て、
+// フラグの誤りでは「flag の生エラー + help + こちらのエラー」が重なる。
+func TestHelpIsPrintedOnce(t *testing.T) {
+	const help = "SLACK-CLI-HELP-SENTINEL\n"
+
+	// --help: stdout に 1 回だけ。stderr には出さない。
+	stdout, stderr, done, err := captureParseArgs(t, help, []string{"--help"})
+	if err != nil || !done {
+		t.Fatalf("--help は正常終了すべき: done=%v err=%v", done, err)
+	}
+	if n := strings.Count(stdout, "SLACK-CLI-HELP-SENTINEL"); n != 1 {
+		t.Errorf("help が stdout に %d 回出ている（1 回であるべき）", n)
+	}
+	// 🚨 flag パッケージ自身には**何も**出力させない（出力は parseArgs に一本化する）。
+	// 「sentinel が出ていないこと」だけを見ると、flag が別の文言を出す変異を素通しする。
+	if stderr != "" {
+		t.Errorf("--help で stderr へ出力している（flag パッケージの Usage が生きている）: %q", stderr)
+	}
+
+	// フラグの誤り: 出力は 1 本のエラーだけ。help 全文を撒かない。
+	stdout, stderr, done, err = captureParseArgs(t, help, []string{"-nosuchflag"})
+	if err == nil || done {
+		t.Fatal("フラグの誤りはエラーにすべき")
+	}
+	if exitCodeFor(err) != 2 {
+		t.Errorf("終了コード: got %d, want 2", exitCodeFor(err))
+	}
+	if stdout != "" || stderr != "" {
+		t.Errorf("フラグ誤りの出力が二重になっている（メッセージは戻り値の error だけで運ぶ）: stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(err.Error(), "--help") {
+		t.Errorf("help への誘導が無い: %v", err)
+	}
+}
+
+// captureParseArgs は parseArgs の stdout / stderr を捕まえる。
+func captureParseArgs(t *testing.T, help string, args []string) (stdout, stderr string, done bool, err error) {
+	t.Helper()
+	outR, outW, _ := os.Pipe()
+	errR, errW, _ := os.Pipe()
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
+
+	fs := newFlagSet("search")
+	fs.String("c", "", "columns")
+	done, err = parseArgs(fs, help, args)
+
+	outW.Close()
+	errW.Close()
+	o, _ := io.ReadAll(outR)
+	e, _ := io.ReadAll(errR)
+	return string(o), string(e), done, err
 }
 
 // カラム指定の誤りは「使い方エラー」(rc=2) にすること。

@@ -43,7 +43,7 @@ func promptDefault(r *bufio.Reader, label, def string) string {
 
 func cmdSetup(args []string) error {
 	var cfg config.Config
-	fs := newFlagSet("setup", setupHelp)
+	fs := newFlagSet("setup")
 	registerCommon(fs, &cfg) // 現在の既定（env/config.yml）を初期値として使う
 	if done, err := parseArgs(fs, setupHelp, args); err != nil || done {
 		return err

@@ -50,7 +50,7 @@ func cmdSearch(args []string) error {
 	var columnsSpec, inChannel, fromUser string
 	var noHeader bool
 
-	fs := newFlagSet("search", searchHelp)
+	fs := newFlagSet("search")
 	registerCommon(fs, &cfg)
 	fs.IntVar(&count, "n", cfg.Count, "取得件数")
 	fs.IntVar(&page, "page", 1, "ページ番号")

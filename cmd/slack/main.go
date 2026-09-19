@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -139,11 +140,17 @@ func registerCommon(fs *flag.FlagSet, cfg *config.Config) {
 	cfg.Count = count
 }
 
-// newFlagSet は共通の Usage（サブコマンド詳細 help）を設定した FlagSet を作る。
-func newFlagSet(name, help string) *flag.FlagSet {
+// newFlagSet はサブコマンド用の FlagSet を作る。
+//
+// 🚨 flag パッケージ自身には何も出力させない。ContinueOnError の Parse は
+// 失敗時に「エラー文を Output へ」+「Usage を呼ぶ」を自分で行うため、
+// 既定のままだと --help で help が 2 回（Usage 経由と parseArgs 経由）、
+// フラグの誤りで「flag の生エラー + help + こちらのエラー」が重なって出る。
+// 出力は parseArgs に一本化する。
+func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, help) }
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	return fs
 }
 
@@ -158,7 +165,8 @@ func parseArgs(fs *flag.FlagSet, help string, args []string) (helpRequested bool
 			fmt.Fprint(os.Stdout, help)
 			return true, nil
 		}
-		return false, &config.UsageError{Msg: "エラー: " + e.Error()}
+		return false, &config.UsageError{Msg: fmt.Sprintf(
+			"エラー: %v\n使い方は  slack %s --help  を参照してください。", e, fs.Name())}
 	}
 	return false, nil
 }

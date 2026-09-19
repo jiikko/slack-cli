@@ -85,7 +85,11 @@ func Resolve(ctx context.Context, cfg config.Config, creds Credentials, stderr i
 	var lastErr error
 	triedToken := 0
 
-	for _, profile := range candidateProfiles(cfg, ws, creds) {
+	profiles := candidateProfiles(cfg, ws, creds)
+	// プロファイルが固定されているか（固定だと「そのプロファイルの中だけ」を探す）。
+	profileFixed := strings.TrimSpace(cfg.Profile) != "" && cfg.Profile != auth.ProfileAuto
+
+	for _, profile := range profiles {
 		cookie, err := creds.Cookie(profile, host)
 		if err != nil {
 			lastErr = err
@@ -136,7 +140,7 @@ func Resolve(ctx context.Context, cfg config.Config, creds Credentials, stderr i
 		}
 	}
 
-	return nil, resolveFailure(ws, seenElsewhere, triedToken, lastErr)
+	return nil, resolveFailure(ws, seenElsewhere, triedToken, lastErr, profiles, profileFixed)
 }
 
 // tokensFor は候補トークンを返す。明示指定があればそれだけ（ただし検証は同じ）。
@@ -172,8 +176,26 @@ func candidateProfiles(cfg config.Config, ws string, creds Credentials) []string
 	return out
 }
 
+// profileScopeNote は「どこまで探したか」を案内に足す。
+//
+// 🚨 プロファイルを固定していると、探索は**そのプロファイルの中だけ**で終わる。
+// これを書かないと「Chrome から見つかったのは次のワークスペースです」という一覧が
+// 「Chrome 全体を探した結果」に読めてしまい、実際には別プロファイルにログイン
+// している対象を「無い」と誤診する（実際に誤診した）。
+func profileScopeNote(profiles []string, fixed bool) string {
+	if !fixed || len(profiles) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"\n  なお、探したのは Chrome プロファイル %q だけです（-profile / config.yml で固定されているため）。\n"+
+			"  別のプロファイルにログインしているかもしれません。全プロファイルを探すには:\n"+
+			"    slack <コマンド> -profile auto ...     （その場限り）\n"+
+			"    slack config set profile auto          （恒久）\n"+
+			"  どのプロファイルに何があるかは  slack setup  で一覧できます。", profiles[0])
+}
+
 // resolveFailure は失敗時の案内を組み立てる（仕様 §8）。
-func resolveFailure(ws string, seenElsewhere map[string]string, triedToken int, lastErr error) error {
+func resolveFailure(ws string, seenElsewhere map[string]string, triedToken int, lastErr error, profiles []string, profileFixed bool) error {
 	if len(seenElsewhere) > 0 {
 		domains := make([]string, 0, len(seenElsewhere))
 		for d := range seenElsewhere {
@@ -192,20 +214,25 @@ func resolveFailure(ws string, seenElsewhere map[string]string, triedToken int, 
 		}
 		fmt.Fprintf(&b, "  対象を変えるなら:  slack config set workspace %s\n", domains[0])
 		fmt.Fprintf(&b, "  %q を使うなら Chrome で https://%s.slack.com にログインしてください。", ws, ws)
+		b.WriteString(profileScopeNote(profiles, profileFixed))
 		return errors.New(b.String())
 	}
 	if triedToken > 0 {
 		return fmt.Errorf(
 			"Slack のトークンは見つかりましたが、いずれも認証が通りませんでした（%d 件試行）。\n"+
 				"  Chrome で https://%s.slack.com にログインし直してから再実行してください。\n"+
-				"  直前のエラー: %v", triedToken, ws, lastErr)
+				"  直前のエラー: %v%s", triedToken, ws, lastErr, profileScopeNote(profiles, profileFixed))
 	}
 	if lastErr != nil {
+		if note := profileScopeNote(profiles, profileFixed); note != "" {
+			return fmt.Errorf("%v%s", lastErr, note)
+		}
 		return lastErr
 	}
 	return fmt.Errorf(
 		"Chrome から Slack の資格情報を取り出せませんでした。\n"+
-			"  %s で https://%s.slack.com にログインしているか確認してください。", auth.ChromeName, ws)
+			"  %s で https://%s.slack.com にログインしているか確認してください。%s",
+		auth.ChromeName, ws, profileScopeNote(profiles, profileFixed))
 }
 
 // 型の取り違えを防ぐための静的チェック（ChromeCredentials が Credentials を満たすこと）。

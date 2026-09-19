@@ -1,4 +1,9 @@
-class Slack < Formula
+# Homebrew formula。tap リポジトリ (jiikko/homebrew-tap) の Formula/ へ置く正本のコピー。
+#
+# 🚨 このファイルを更新したら tap 側にも反映すること（tap に無いと
+# `brew install jiikko/tap/slack-cli` は届かない）。sha256 はリリース tarball のもの:
+#   curl -sL https://github.com/jiikko/slack-cli/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+class SlackCli < Formula
   desc "Read-only CLI for Slack that borrows your Chrome login session"
   homepage "https://github.com/jiikko/slack-cli"
   url "https://github.com/jiikko/slack-cli/archive/refs/tags/v0.1.0.tar.gz"

@@ -17,7 +17,7 @@ const whoamiHelp = `slack whoami - 接続中のユーザーとワークスペー
 
 func cmdWhoami(args []string) error {
 	var cfg config.Config
-	fs := newFlagSet("whoami", whoamiHelp)
+	fs := newFlagSet("whoami")
 	registerCommon(fs, &cfg)
 	if done, err := parseArgs(fs, whoamiHelp, args); err != nil || done {
 		return err

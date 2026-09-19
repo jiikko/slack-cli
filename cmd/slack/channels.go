@@ -39,7 +39,7 @@ func cmdChannels(args []string) error {
 	var noHeader bool
 	var limit int
 
-	fs := newFlagSet("channels", channelsHelp)
+	fs := newFlagSet("channels")
 	registerCommon(fs, &cfg)
 	fs.StringVar(&types, "types", "public_channel,private_channel", "取得する種別（カンマ区切り）")
 	fs.StringVar(&nameFilter, "name", "", "名前の部分一致フィルタ")

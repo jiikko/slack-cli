@@ -23,7 +23,7 @@ checksum:
   name_template: "checksums.txt"
 
 brews:
-  - name: slack
+  - name: slack-cli
     repository:
       owner: jiikko
       name: homebrew-tap

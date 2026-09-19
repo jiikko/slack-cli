@@ -54,7 +54,7 @@ func cmdHistory(args []string) error {
 	var oldest, latest, columnsSpec string
 	var noHeader bool
 
-	fs := newFlagSet("history", historyHelp)
+	fs := newFlagSet("history")
 	registerCommon(fs, &cfg)
 	fs.IntVar(&count, "n", 50, "取得件数")
 	fs.StringVar(&oldest, "oldest", "", "この ts より新しいメッセージ")
@@ -108,7 +108,7 @@ func cmdThread(args []string) error {
 	var columnsSpec string
 	var noHeader bool
 
-	fs := newFlagSet("thread", threadHelp)
+	fs := newFlagSet("thread")
 	registerCommon(fs, &cfg)
 	fs.IntVar(&count, "n", 200, "取得件数")
 	fs.StringVar(&columnsSpec, "columns", messageColumns.Defaults(), "表示カラム。指定可能: "+messageColumns.Available())

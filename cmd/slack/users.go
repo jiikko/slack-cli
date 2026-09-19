@@ -39,7 +39,7 @@ func cmdUsers(args []string) error {
 	var noHeader, withBots, withDeleted bool
 	var limit int
 
-	fs := newFlagSet("users", usersHelp)
+	fs := newFlagSet("users")
 	registerCommon(fs, &cfg)
 	fs.StringVar(&nameFilter, "name", "", "name / real_name の部分一致フィルタ")
 	fs.StringVar(&columnsSpec, "columns", userColumns.Defaults(), "表示カラム。指定可能: "+userColumns.Available())
