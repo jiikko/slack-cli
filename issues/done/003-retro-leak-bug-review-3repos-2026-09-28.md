@@ -65,5 +65,7 @@ repo ごとにレビュアーを立てたので、同じ穴を 2〜3 回見つ�
 
 ## 残課題
 
-- [ ] 1・2 の切り出し（ユーザー判断待ち）
-- [ ] 3 repo のリリース（slack-cli-17 セッションへ依頼済み）
+- [x] 1・2 の切り出し → dotfiles の `docs(rules): 候補を順に試す処理の即停止分類と、移植で共有する判断のレビューを 1 本にする規律を足す` で追記済み
+  （1 は adversarial-review-own-safeguards §1 の表、2 は parallel-write-agents-need-worktree-isolation）
+- 3 は却下（既存ルールでカバー）、4 は局所的な出来事として記録のみ
+- 3 repo のリリースは slack-cli-17 セッションへ依頼済み（この retro の範囲外）
