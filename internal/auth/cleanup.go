@@ -35,14 +35,13 @@ import (
 var (
 	cleanupMu    sync.Mutex
 	cleanupPaths = map[string]struct{}{}
+	// cleanupClosing は②（シグナル経路）が後始末を始めたことを表す。以後は新しい
+	// 一時ディレクトリを作らせない（cleanupMu の下で読み書きする）。
+	cleanupClosing bool
 )
 
-// registerCleanup は「プロセスが終わる前に消すべきパス」を登録する（②が使う）。
-func registerCleanup(path string) {
-	cleanupMu.Lock()
-	defer cleanupMu.Unlock()
-	cleanupPaths[path] = struct{}{}
-}
+// errCleanupClosing は終了処理中に一時ディレクトリを作ろうとしたことを表す。
+var errCleanupClosing = errors.New("終了処理中のため、一時コピーを作りません")
 
 // RunAllCleanups は登録済みのパスをすべて削除する。
 // ①の defer と②のシグナル経路の両方から呼ばれるが、二重呼び出しは無害。
@@ -58,17 +57,39 @@ func registerCleanup(path string) {
 //
 // 🚨 削除ループはロックを保持したまま回す。先に map を空にしてロックを外すと、
 // シグナル経路が「消すものは無い」と判断して os.Exit し、**削除途中のコピーが残る**。
+//
+// 🚨 登録簿から消すのは**削除に成功したものだけ**。削除前に消すと、失敗したパスは
+// 同じプロセスの中で二度と再試行されない（① の defer → エラー経路 → main の defer と
+// 複数回呼ばれるのは、再試行の機会でもある）。
 func RunAllCleanups() {
 	cleanupMu.Lock()
 	defer cleanupMu.Unlock()
+	runAllCleanupsLocked()
+}
+
+// shutdownCleanups は②（シグナル経路）の後始末。「終了中」を立ててから全件を消す。
+//
+// 🚨 「終了中」は後始末と**同じロックの下で**立てる。後始末が終わってから os.Exit までの間に
+// main 側が newTempDir を進めると、作られたコピー（Cookie DB / leveldb）は誰にも消されずに残る。
+// 立てた後は newTempDir が作成そのものを断る（作成と登録は同じロックの下で行う）。
+func shutdownCleanups() {
+	cleanupMu.Lock()
+	defer cleanupMu.Unlock()
+	cleanupClosing = true
+	runAllCleanupsLocked()
+}
+
+// runAllCleanupsLocked は cleanupMu を保持した状態で呼ぶ。
+func runAllCleanupsLocked() {
 	if len(cleanupPaths) == 0 {
 		return
 	}
 
 	root := tempRoot()
 	names := make([]string, 0, len(cleanupPaths))
+	byName := make(map[string]string, len(cleanupPaths))
 	for p := range cleanupPaths {
-		// 想定外の場所が登録されていたら触らない（登録経路は newTempDir だけ）。
+		// 想定外の場所が登録されていたら触らない（登録経路は newTempDirWith だけ）。
 		//
 		// 🚨 これは**冗長**な検査（変異検証で確認）。削除は removeVerified が
 		// 検証済み root からの相対名で行うので、作業領域の外を消すことは構造的に起きない。
@@ -79,9 +100,13 @@ func RunAllCleanups() {
 			continue
 		}
 		names = append(names, filepath.Base(p))
-		delete(cleanupPaths, p)
+		byName[filepath.Base(p)] = p
 	}
-	if err := removeVerified(names...); err != nil {
+	removed, err := removeVerified(names...)
+	for _, name := range removed {
+		delete(cleanupPaths, byName[name])
+	}
+	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "警告: 一時コピーを削除できませんでした: %v\n", err)
 		}
@@ -127,7 +152,7 @@ func InstallCleanupOnSignal() {
 		sig := <-ch
 		handleCleanupSignal(sig,
 			resetFunc(func() { signal.Reset(cleanupSignals...) }),
-			cleanupFunc(RunAllCleanups),
+			cleanupFunc(shutdownCleanups),
 			os.Exit)
 	}()
 }
@@ -301,16 +326,17 @@ func openVerifiedTempRootWith(uid int, afterLstat func(string)) (*os.Root, error
 }
 
 // removeVerified は検証済みの作業領域から names（いずれも 1 コンポーネント）を削除する。
+// 戻り値 removed は削除に成功した（= もう存在しない）名前。
 //
 // 🚨 削除の実装をここ 1 本に寄せる。①（defer）と②（シグナル経路）で別々に書くと、
 // 片方だけがパス文字列の os.RemoveAll のまま取り残される（実際に起きた）。
-func removeVerified(names ...string) error {
+func removeVerified(names ...string) (removed []string, err error) {
 	if len(names) == 0 {
-		return nil
+		return nil, nil
 	}
 	r, err := openVerifiedTempRoot()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer r.Close()
 	var firstErr error
@@ -322,11 +348,15 @@ func removeVerified(names ...string) error {
 			}
 			continue
 		}
-		if err := r.RemoveAll(name); err != nil && firstErr == nil {
-			firstErr = err
+		if err := r.RemoveAll(name); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		removed = append(removed, name)
 	}
-	return firstErr
+	return removed, firstErr
 }
 
 // ensureTempRoot は作業領域を 0700 で用意し、検証して返す。
@@ -456,24 +486,65 @@ func processAlive(pid int) bool {
 	return true // EPERM 等、判断できないときは消さない
 }
 
+// tempRootError は作業領域の異常を、場所と対処つきの EnvError にする。
+func tempRootError(err error) error {
+	where := tempRoot()
+	if where == "" {
+		where = "~/Library/Caches/" + tempRootParentName + "/" + tempRootName
+	}
+	return &EnvError{
+		Msg: fmt.Sprintf(
+			"作業領域（%s）を用意できませんでした。\n"+
+				"  このディレクトリと親（%s）が、自分の所有する通常のディレクトリ（シンボリックリンクではない）であることを確認してください。\n"+
+				"  心当たりが無ければ、中身ごと削除して再実行すると作り直されます。",
+			where, filepath.Dir(where)),
+		Err: err,
+	}
+}
+
 // newTempDir は「①②③すべての対象になる」一時ディレクトリを作る。
 // 戻り値の cleanup は ① として defer で呼ぶこと。
 //
 // Cookie DB と Local Storage(leveldb) の両方がこの関数を通る。片方だけ別経路で
 // os.MkdirTemp すると、その残骸は②③のどちらにも拾われない。
 func newTempDir() (dir string, cleanup func(), err error) {
+	return newTempDirWith(nil)
+}
+
+// newTempDirWith は newTempDir の本体。afterMkdir はテストが「作成と登録の間」に
+// 割り込むための窓（本番は nil）。グローバル変数にしない理由は openVerifiedTempRootWith と同じ。
+//
+// 🚨 作成（MkdirTemp）と登録は**同じロックの下で**行う。ロックの外で作ってから登録すると、
+// その間に②が後始末を終えて os.Exit へ進んだとき、作ったディレクトリは誰にも消されない。
+// 終了処理中（cleanupClosing）なら作らずに断る。
+//
+// 🚨 失敗はすべて EnvError で返す。作業領域は全プロファイル共通なので、ここが壊れている
+// （シンボリックリンク・所有者違い・作成失敗・終了処理中）とどのプロファイルを試しても同じ。
+// 素のエラーのままだと、探索が「そのプロファイルには無い」として次へ進み、最後に
+// 「Chrome でログインしてから」という無関係な案内に化ける（setup で再現した）。
+func newTempDirWith(afterMkdir func()) (dir string, cleanup func(), err error) {
 	root, err := ensureTempRoot()
 	if err != nil {
-		return "", nil, err
+		return "", nil, tempRootError(err)
+	}
+	cleanupMu.Lock()
+	if cleanupClosing {
+		cleanupMu.Unlock()
+		return "", nil, tempRootError(errCleanupClosing)
 	}
 	// ディレクトリ名に pid を埋める（③がこれを見て「生きていない実行の残骸」を判定する）。
 	d, err := os.MkdirTemp(root, fmt.Sprintf("%d-", os.Getpid()))
 	if err != nil {
-		return "", nil, err
+		cleanupMu.Unlock()
+		return "", nil, tempRootError(err)
 	}
-	registerCleanup(d)
+	if afterMkdir != nil {
+		afterMkdir()
+	}
+	cleanupPaths[d] = struct{}{}
+	cleanupMu.Unlock()
 	// 🚨 ①も②③と同じ「検証済みの作業領域を開いた fd」経由で消す。
 	// ここだけパス文字列の os.RemoveAll に戻すと、作業領域を差し替えられたときに
 	// リンク先を消す経路が復活する（①の窓は「作業中ずっと」なので最も広い）。
-	return d, func() { _ = removeVerified(filepath.Base(d)) }, nil
+	return d, func() { _, _ = removeVerified(filepath.Base(d)) }, nil
 }

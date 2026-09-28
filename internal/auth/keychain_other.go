@@ -2,10 +2,7 @@
 
 package auth
 
-import (
-	"errors"
-	"runtime"
-)
+import "runtime"
 
 // getKeychainPassword は macOS 以外では使えない。
 //
@@ -13,5 +10,5 @@ import (
 // 違い、実機で確認していない値を並べると「動くように見えて別の領域を読む」事故になる。
 // ビルドは通す（go vet / test を全 platform で回すため）が、実行時に明示的に断る。
 func getKeychainPassword() ([]byte, error) {
-	return nil, errors.New("slack-cli は macOS 専用です（現在の GOOS=" + runtime.GOOS + "）。Chrome の Cookie 復号に macOS Keychain を使います")
+	return nil, &EnvError{Msg: "slack-cli は macOS 専用です（現在の GOOS=" + runtime.GOOS + "）。Chrome の Cookie 復号に macOS Keychain を使います"}
 }

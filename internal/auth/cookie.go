@@ -11,6 +11,8 @@ import (
 	"crypto/cipher"
 	"crypto/pbkdf2"
 	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -51,11 +53,21 @@ func deriveKey(password []byte) ([]byte, error) {
 
 // decryptValue は encrypted_value を復号する。
 // v10 / v11 プレフィックスなら AES-128-CBC（IV=0x20*16, PKCS7）で復号し、
-// metaVersion>=24 なら復号後の先頭 32 バイト（ホスト名の SHA256 ハッシュ）を落とす。
+// metaVersion>=24 なら復号後の先頭 32 バイトが SHA256(hostKey) であることを照合してから落とす。
 //
 // 🚨 v11 を「プレフィックス無し = 平文」として素通しさせないこと。素通しすると
 // 復号されないバイト列がそのまま Cookie ヘッダへ載り、原因の分からない 401 になる。
-func decryptValue(enc, key []byte, metaVersion int) (string, error) {
+//
+// 🚨 v24 以上の「先頭 32 バイト = SHA256(host_key)」の照合を省かないこと。鍵が違っても
+// PKCS7 の末尾は約 1/256 の確率で偶然通り、v24 の値は長いので 32 バイト落としても何か残る。
+// 照合しないと、鍵違いのゴミが「復号できた cookie」として通り、全件失敗の検出
+// （decryptStats.allFailed）が実際の件数では働かない（nrql の同じコードでレビューが再現）。
+// 根拠: Chromium の sqlite_persistent_cookie_store（DB バージョン 24 の domain hash prefix。
+// 暗号化前の値の先頭に host_key の SHA256 を付け、復号時に一致しなければ失敗として扱う）。
+// 🚨 照合の入力（host_key の表記）を取り違えると**正常な cookie が全部**復号失敗になる。
+// host_key は DB の列の値をそのまま使う（先頭ドットを落とさない・小文字化しない）。
+// 2026-09-28 に meta v24 の実 Chrome で、正常な Cookie が照合を通り認証できることを確認した。
+func decryptValue(enc, key []byte, metaVersion int, hostKey string) (string, error) {
 	if len(enc) == 0 {
 		return "", nil
 	}
@@ -87,10 +99,14 @@ func decryptValue(enc, key []byte, metaVersion int) (string, error) {
 		return "", err
 	}
 	if metaVersion >= 24 {
-		if len(plain) < 32 {
+		if len(plain) < sha256.Size {
 			return "", errors.New("復号結果がハッシュプレフィックスより短いです")
 		}
-		plain = plain[32:]
+		want := sha256.Sum256([]byte(hostKey))
+		if subtle.ConstantTimeCompare(plain[:sha256.Size], want[:]) != 1 {
+			return "", errors.New("復号結果の先頭がホスト名のハッシュと一致しません（鍵が違う可能性）")
+		}
+		plain = plain[sha256.Size:]
 	}
 	return string(plain), nil
 }
@@ -135,8 +151,13 @@ func cookieDBSourcePath(profile string) (string, error) {
 		filepath.Join(base, "Cookies"),
 	}
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		_, err := os.Stat(c)
+		if err == nil {
 			return c, nil
+		}
+		// 🚨 アクセス拒否を「見つからない」に化けさせない（案内が「プロファイル名を確認」になる）。
+		if os.IsPermission(err) {
+			return "", diskAccessError("Cookie DB ", c, err)
 		}
 	}
 	return "", fmt.Errorf(
@@ -148,13 +169,14 @@ func cookieDBSourcePath(profile string) (string, error) {
 
 // copyCookieDB は Cookie DB を一時ディレクトリへコピーする。
 // WAL に未反映のセッション Cookie を取りこぼさないよう、-wal / -shm も同名でコピーする。
-// 返り値: 一時 DB パスと後始末関数（① の defer で必ず呼ぶ）。
-func copyCookieDB(src string) (string, func(), error) {
+// 返り値: 一時 DB パスと後始末関数（① の defer で必ず呼ぶ）と、読めずに飛ばしたファイルの記録。
+func copyCookieDB(src string) (string, func(), skippedReads, error) {
 	tmpdir, cleanup, err := newTempDir()
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
+	var skipped skippedReads
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		s := src + suffix
 		data, err := os.ReadFile(s)
@@ -162,50 +184,90 @@ func copyCookieDB(src string) (string, func(), error) {
 			if suffix == "" {
 				cleanup()
 				if os.IsPermission(err) {
-					return "", nil, fmt.Errorf(
-						"Cookie DB を読み取れませんでした（アクセス拒否）。\n"+
-							"  ターミナル（またはこのツールを起動しているアプリ）に「フルディスクアクセス」を付与してください:\n"+
-							"    システム設定 → プライバシーとセキュリティ → フルディスクアクセス\n"+
-							"  対象ファイル: %s", src)
+					return "", nil, nil, diskAccessError("Cookie DB ", src, err)
 				}
-				return "", nil, fmt.Errorf("Cookie DB の読み取りに失敗: %w", err)
+				return "", nil, nil, fmt.Errorf("Cookie DB の読み取りに失敗: %w", err)
 			}
-			continue // -wal / -shm は存在しないこともある
+			// -wal / -shm は存在しないこともある（ENOENT は記録しない）。
+			// 🚨 それ以外の失敗は記録する。WAL にだけあるセッション cookie を取りこぼすと
+			// 「ログインしていない」に化けるので、見つからなかったときの案内に添える。
+			skipped.add(err)
+			continue
 		}
 		dst := filepath.Join(tmpdir, "Cookies"+suffix)
 		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			cleanup()
-			return "", nil, err
+			return "", nil, nil, err
 		}
 	}
-	return filepath.Join(tmpdir, "Cookies"), cleanup, nil
+	return filepath.Join(tmpdir, "Cookies"), cleanup, skipped, nil
+}
+
+// rawCookie は cookies テーブルの 1 行（復号前）。
+type rawCookie struct {
+	host, name, plain string
+	enc               []byte
+}
+
+// decryptStats は復号の試行結果（全件失敗 = 鍵が合っていない、を判定するため）。
+type decryptStats struct {
+	tried, failed int
+}
+
+// allFailed は「1 件以上試して、すべて失敗した」かを返す。
+func (d decryptStats) allFailed() bool { return d.tried > 0 && d.failed == d.tried }
+
+// decryptCookies は復号前の行を復号する。1 件の失敗では止めない（取れたものだけ返す）。
+func decryptCookies(rows []rawCookie, key []byte, metaVersion int) ([]cookieEntry, decryptStats) {
+	var out []cookieEntry
+	var st decryptStats
+	for _, r := range rows {
+		value := r.plain
+		if value == "" && len(r.enc) > 0 {
+			st.tried++
+			v, derr := decryptValue(r.enc, key, metaVersion, r.host)
+			if derr != nil {
+				st.failed++
+				continue // 1 件の復号失敗で全体を止めない（全件失敗は呼び出し側が判定する）
+			}
+			value = v
+		}
+		out = append(out, cookieEntry{host: r.host, name: r.name, value: value})
+	}
+	return out, st
 }
 
 // extractCookies は指定プロファイル（Chrome）から name の Cookie を復号して返す。
 // name が空なら全件。Slack の用途では "d" だけを取る（露出面を最小にする）。
-func extractCookies(profile, name string) ([]cookieEntry, error) {
+//
+// 戻り値の decryptStats / skippedReads は「見つからなかった」ときの原因の手がかり
+// （呼び出し側が、目的の cookie が無かったときにだけ使う）。
+func extractCookies(profile, name string) ([]cookieEntry, decryptStats, skippedReads, error) {
+	fail := func(err error) ([]cookieEntry, decryptStats, skippedReads, error) {
+		return nil, decryptStats{}, nil, err
+	}
 	password, err := getKeychainPassword()
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	key, err := deriveKey(password)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	src, err := cookieDBSourcePath(profile)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	dbPath, cleanup, err := copyCookieDB(src)
+	dbPath, cleanup, skipped, err := copyCookieDB(src)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	defer cleanup() // ①: 正常終了・エラー・panic を覆う
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	defer db.Close()
 
@@ -223,28 +285,23 @@ func extractCookies(profile, name string) ([]cookieEntry, error) {
 	}
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("cookies テーブルの読み取りに失敗: %w", err)
+		return fail(fmt.Errorf("cookies テーブルの読み取りに失敗: %w", err))
 	}
 	defer rows.Close()
 
-	var out []cookieEntry
+	var raw []rawCookie
 	for rows.Next() {
-		var host, cname, plainValue string
-		var enc []byte
-		if err := rows.Scan(&host, &cname, &plainValue, &enc); err != nil {
-			return nil, err
+		var r rawCookie
+		if err := rows.Scan(&r.host, &r.name, &r.plain, &r.enc); err != nil {
+			return fail(err)
 		}
-		value := plainValue
-		if value == "" && len(enc) > 0 {
-			v, derr := decryptValue(enc, key, metaVersion)
-			if derr != nil {
-				continue // 1 件の復号失敗で全体を止めない
-			}
-			value = v
-		}
-		out = append(out, cookieEntry{host: host, name: cname, value: value})
+		raw = append(raw, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return fail(err)
+	}
+	out, st := decryptCookies(raw, key, metaVersion)
+	return out, st, skipped, nil
 }
 
 // cookieHostMatches は Cookie の host_key が対象ホストに送信されるべきか判定する。
@@ -287,18 +344,33 @@ func pickCookie(cookies []cookieEntry, reqHost string) (string, bool) {
 // 取り出すのは name="d" だけ。全 Cookie を載せる Cookie ヘッダは作らない
 // （Slack の内部 API に必要なのは d だけで、他を送るのは露出面を広げるだけ）。
 func SlackDCookie(profile, host string) (string, error) {
-	cookies, err := extractCookies(profile, slackCookieName)
+	cookies, st, skipped, err := extractCookies(profile, slackCookieName)
 	if err != nil {
 		return "", err
 	}
 	v, ok := pickCookie(cookies, host)
 	if !ok {
-		return "", fmt.Errorf(
-			"%s 宛ての %q cookie がプロファイル %q にありません。\n"+
-				"  %s で https://%s にログインしているか確認してください。",
-			host, slackCookieName, profile, ChromeName, host)
+		return "", dCookieNotFound(profile, host, st, skipped)
 	}
 	return v, nil
+}
+
+// dCookieNotFound は d cookie が見つからなかったときのエラーを、原因の手がかりに応じて作る。
+//
+// 🚨 「ログインしているか確認して」は最後の選択肢。復号が全件失敗した（鍵違い）/
+// 読めなかったファイルがある、のに「ログインして」と案内すると、原因にたどり着けない。
+func dCookieNotFound(profile, host string, st decryptStats, skipped skippedReads) error {
+	if st.allFailed() {
+		return &ReadError{Kind: DecryptFailed, Msg: fmt.Sprintf(
+			"プロファイル %q の %q cookie を %d 件試しましたが、すべて復号に失敗しました", profile, slackCookieName, st.tried)}
+	}
+	if err := skipped.asError(fmt.Sprintf("%s 宛ての %q cookie ", host, slackCookieName)); err != nil {
+		return err
+	}
+	return fmt.Errorf(
+		"%s 宛ての %q cookie がプロファイル %q にありません。\n"+
+			"  %s で https://%s にログインしているか確認してください。",
+		host, slackCookieName, profile, ChromeName, host)
 }
 
 // Mask は資格情報を表示用に短縮する。生値を絶対に返さない。

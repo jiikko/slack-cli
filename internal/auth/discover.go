@@ -1,9 +1,6 @@
 package auth
 
 import (
-	"io/fs"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 )
@@ -42,21 +39,14 @@ func DiscoverWorkspaces(profile string) ([]WorkspaceHint, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir, cleanup, err := copyLevelDB(src)
+	dir, cleanup, skipped, err := copyLevelDB(src)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
 
 	counts := map[string]int{}
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		data, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return nil
-		}
+	walkCopiedFiles(dir, &skipped, func(data []byte) {
 		for _, m := range domainRe.FindAllSubmatch(data, -1) {
 			sub := string(m[1])
 			if nonWorkspaceSubdomains[sub] {
@@ -64,8 +54,13 @@ func DiscoverWorkspaces(profile string) ([]WorkspaceHint, error) {
 			}
 			counts[sub]++
 		}
-		return nil
 	})
+	if len(counts) == 0 {
+		// 🚨 読めなかったファイルがあるのに「候補なし」にしない。
+		if err := skipped.asError("ワークスペースの痕跡"); err != nil {
+			return nil, err
+		}
+	}
 
 	out := make([]WorkspaceHint, 0, len(counts))
 	for d, n := range counts {

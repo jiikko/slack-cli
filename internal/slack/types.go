@@ -4,9 +4,11 @@ import "encoding/json"
 
 // envelope は Slack API の共通レスポンス枠。
 type envelope struct {
-	OK               bool   `json:"ok"`
-	Error            string `json:"error"`
-	Warning          string `json:"warning"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	Warning string `json:"warning"`
+	// HasMore は history / replies が返す「続きがある」。next_cursor と食い違うことがあるので両方見る。
+	HasMore          bool `json:"has_more"`
 	ResponseMetadata struct {
 		NextCursor string   `json:"next_cursor"`
 		Messages   []string `json:"messages"`

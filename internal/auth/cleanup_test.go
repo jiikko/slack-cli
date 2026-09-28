@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -23,7 +24,14 @@ func isolateTemp(t *testing.T) string {
 	t.Setenv("HOME", home)
 	cleanupMu.Lock()
 	cleanupPaths = map[string]struct{}{}
+	cleanupClosing = false
 	cleanupMu.Unlock()
+	// 「終了中」を立てるテストの後に、別のテストが一時ディレクトリを作れなくならないように戻す。
+	t.Cleanup(func() {
+		cleanupMu.Lock()
+		cleanupClosing = false
+		cleanupMu.Unlock()
+	})
 
 	parent, err := tempRootParent()
 	if err != nil {
@@ -33,6 +41,14 @@ func isolateTemp(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return parent
+}
+
+// registerCleanup は後始末の登録簿へ直接書き込む（登録経路が壊れた状態を模すテスト用）。
+// 本番の登録は newTempDirWith がロックの下で作成と同時に行う。
+func registerCleanup(path string) {
+	cleanupMu.Lock()
+	defer cleanupMu.Unlock()
+	cleanupPaths[path] = struct{}{}
 }
 
 // deadPID は確実に終了済みのプロセス ID を返す。
@@ -692,5 +708,212 @@ func TestSignalHandlerPassesRealReset(t *testing.T) {
 	})
 	if !found {
 		t.Fatal("handleCleanupSignal の呼び出しが見つからない（走査が壊れている）")
+	}
+}
+
+// 🚨 ②の後始末が終わってから os.Exit までの間に main 側が newTempDir を進めても、
+// 新しいコピーが作られない（= 誰にも消されない残骸が生まれない）こと。
+//
+// 実シグナルでは「後始末の直後・終了の直前」を壁時計なしに作れないので、
+// handleCleanupSignal の exit に「main がまだ走っている」を演じさせて窓を決定論的に開く。
+func TestSignalShutdownRefusesNewTempDirs(t *testing.T) {
+	isolateTemp(t)
+	before, _, err := newTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var lateDir string
+	var lateErr error
+	handleCleanupSignal(
+		syscall.SIGINT,
+		resetFunc(func() {}),
+		cleanupFunc(shutdownCleanups),
+		func(int) { lateDir, _, lateErr = newTempDir() }, // 終了直前に main が進んだ
+	)
+
+	if _, err := os.Stat(before); !os.IsNotExist(err) {
+		t.Errorf("後始末の前に作られたコピーが消えていない: %v", err)
+	}
+	if lateErr == nil {
+		t.Errorf("終了処理中なのに一時ディレクトリを作った（誰にも消されない）: %s", lateDir)
+	}
+	entries, err := os.ReadDir(tempRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("終了処理の後に残骸がある: %d 件", len(entries))
+	}
+}
+
+// 🚨 作成（MkdirTemp）と登録は同じロックの下で行うこと。
+//
+// ロックの外で作ってから登録すると、その間に②が後始末を終えて終了へ進んだとき、
+// 作ったディレクトリは登録簿に無いので消されない。窓の内側（作成の直後）に割り込み、
+// そこでロックが保持されている = ②が割り込めないことを確かめる。
+func TestTempDirCreationAndRegistrationAreAtomic(t *testing.T) {
+	isolateTemp(t)
+	reached := false
+	dir, cleanup, err := newTempDirWith(func() {
+		reached = true
+		if cleanupMu.TryLock() {
+			cleanupMu.Unlock()
+			t.Error("作成と登録の間でロックが外れている（②がこの窓に割り込むと残骸が残る）")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if !reached {
+		t.Fatal("作成直後の窓に到達していない（検査が空振りしている）")
+	}
+	cleanupMu.Lock()
+	_, registered := cleanupPaths[dir]
+	cleanupMu.Unlock()
+	if !registered {
+		t.Error("作ったディレクトリが後始末に登録されていない")
+	}
+}
+
+// ②の配線: シグナルハンドラへ渡す後始末は「終了中」を立てる shutdownCleanups であること。
+// RunAllCleanups を渡すと、上の窓（後始末の後に newTempDir が進む）が開いたままになる。
+//
+// 脅威モデルは TestSignalHandlerPassesRealReset と同じ（うっかりの差し戻しを止める）。
+func TestSignalHandlerPassesShutdownCleanups(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "cleanup.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "handleCleanupSignal" || len(call.Args) < 3 {
+			return true
+		}
+		found = true
+		conv, ok := call.Args[2].(*ast.CallExpr)
+		if !ok || len(conv.Args) != 1 {
+			t.Errorf("cleanup 引数が cleanupFunc(...) の形ではない")
+			return true
+		}
+		if arg, ok := conv.Args[0].(*ast.Ident); !ok || arg.Name != "shutdownCleanups" {
+			t.Errorf("シグナルハンドラの後始末が shutdownCleanups ではない（終了中を立てない）")
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("handleCleanupSignal の呼び出しが見つからない（走査が壊れている）")
+	}
+}
+
+// 🚨 削除に失敗したパスは登録簿に残り、同じプロセスの中で再試行されること。
+//
+// 削除の前に登録簿から消すと、1 回目（① の defer 経路など）で失敗したコピーは
+// 以後の RunAllCleanups（エラー経路・main の defer・シグナル経路）から二度と消されない。
+func TestFailedCleanupIsRetried(t *testing.T) {
+	parent := isolateTemp(t)
+	dir, _, err := newTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 作業領域を一時的に検証不能にする（symlink に差し替える）→ 1 回目の削除は失敗する。
+	root := tempRoot()
+	moved := filepath.Join(parent, "moved")
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, root); err != nil {
+		t.Skipf("シンボリックリンクを作れない: %v", err)
+	}
+	RunAllCleanups()
+	if _, err := os.Stat(filepath.Join(moved, filepath.Base(dir))); err != nil {
+		t.Fatalf("前提が崩れている: 検証不能な作業領域で削除が起きた: %v", err)
+	}
+
+	// 作業領域を元に戻してから再試行 → 今度は消えること。
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, root); err != nil {
+		t.Fatal(err)
+	}
+	RunAllCleanups()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("1 回目に失敗したコピーが再試行で消えていない: %v", err)
+	}
+	cleanupMu.Lock()
+	n := len(cleanupPaths)
+	cleanupMu.Unlock()
+	if n != 0 {
+		t.Errorf("削除に成功したのに登録簿に残っている: %d 件", n)
+	}
+}
+
+// removeVerified は削除に成功した名前だけを removed に入れること。
+// 失敗した名前まで入れると、RunAllCleanups が登録簿から消して二度と再試行しない。
+func TestRemoveVerifiedReportsOnlySuccesses(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root では権限拒否を作れない")
+	}
+	isolateTemp(t)
+	root, err := ensureTempRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "stuck" は中身を列挙できない（RemoveAll が失敗する）。"ok" は普通に消える。
+	locked := filepath.Join(root, "stuck", "locked")
+	if err := os.MkdirAll(filepath.Join(locked, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "ok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	removed, err := removeVerified("stuck", "ok")
+	if err == nil {
+		t.Fatal("前提: stuck の削除は失敗するはず")
+	}
+	if strings.Join(removed, ",") != "ok" {
+		t.Errorf("removed は成功したものだけであるべき: %q", removed)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ok")); !os.IsNotExist(err) {
+		t.Errorf("1 件の失敗で残りの削除が止まった: %v", err)
+	}
+}
+
+// 🚨 作業領域を用意できない失敗（シンボリックリンク・終了処理中など）は EnvError で返すこと。
+// 作業領域は全プロファイル共通なので、プロファイルを変えても直らない。
+func TestTempRootFailureIsEnvError(t *testing.T) {
+	parent := isolateTemp(t)
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), parent); err != nil {
+		t.Skipf("シンボリックリンクを作れない: %v", err)
+	}
+	_, _, err := newTempDir()
+	if !IsEnvError(err) || !strings.Contains(err.Error(), "作業領域") {
+		t.Errorf("作業領域の異常: EnvError であるべき: %v", err)
+	}
+
+	isolateTemp(t)
+	cleanupMu.Lock()
+	cleanupClosing = true
+	cleanupMu.Unlock()
+	_, _, err = newTempDir()
+	if !IsEnvError(err) || !errors.Is(err, errCleanupClosing) {
+		t.Errorf("終了処理中: EnvError（元は errCleanupClosing）であるべき: %v", err)
 	}
 }

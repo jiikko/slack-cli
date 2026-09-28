@@ -90,11 +90,18 @@ type fakeCreds struct {
 	cookies  map[string]string   // profile -> d cookie
 	tokens   map[string][]string // profile -> xoxc トークン候補（順序つき）
 	tokenErr error
+	// cookieErrs / tokenErrs はプロファイルごとの失敗（Keychain 拒否・フルディスクアクセス不足など、
+	// 本物の auth が返す型付きエラーを模す）。
+	cookieErrs map[string]error
+	tokenErrs  map[string]error
 }
 
 func (f fakeCreds) Profiles() []auth.Profile { return f.profiles }
 
 func (f fakeCreds) Cookie(profile, host string) (string, error) {
+	if err := f.cookieErrs[profile]; err != nil {
+		return "", err
+	}
 	v, ok := f.cookies[profile]
 	if !ok {
 		return "", fmt.Errorf("%s 宛ての cookie がプロファイル %q にありません", host, profile)
@@ -105,6 +112,9 @@ func (f fakeCreds) Cookie(profile, host string) (string, error) {
 func (f fakeCreds) Tokens(profile, workspace string) ([]string, error) {
 	if f.tokenErr != nil {
 		return nil, f.tokenErr
+	}
+	if err := f.tokenErrs[profile]; err != nil {
+		return nil, err
 	}
 	return f.tokens[profile], nil
 }

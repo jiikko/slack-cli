@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,6 +139,48 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("Slack API エラー（%s: %s）", e.Method, e.Code)
 }
 
+// NotJSONError は HTTP 200 なのに本文が JSON ではなかった応答（ログインページ等）。
+//
+// 🚨 型で区別すること。素の fmt.Errorf にすると、Resolve が「ネットワーク障害」と同じ扱いで
+// 即座に返し、後ろの候補（別プロファイルの有効なセッション）が試されない。
+// ログインページが返る = その cookie のセッションが切れている、なので「未認証」に近い。
+type NotJSONError struct {
+	Method string
+}
+
+func (e *NotJSONError) Error() string {
+	return fmt.Sprintf("JSON ではない応答を受け取りました（%s）。Chrome で再ログインしてから試してください", e.Method)
+}
+
+// ResponseTooLargeError は応答が maxResponseBytes を超えたことを表す。
+//
+// 🚨 黙って切り詰めないこと。切り詰めた本文は JSON として壊れているので、
+// 「JSON ではない応答 = 再ログインして」という**誤った案内**に化ける。
+type ResponseTooLargeError struct {
+	Method string
+	Limit  int64
+}
+
+func (e *ResponseTooLargeError) Error() string {
+	return fmt.Sprintf("応答が大きすぎます（%s: %d バイトを超えました）。-n などで取得件数を減らしてください", e.Method, e.Limit)
+}
+
+// retryAfterText は Retry-After ヘッダを案内文の「待つ時間」の部分にする。
+//
+// Retry-After は秒数（整数）か HTTP-date のどちらか（RFC 9110 §10.2.3）。
+// 整数として解釈できたときだけ「秒」を付ける。それ以外は値をそのまま（%q で）示す
+// （"Wed, 21 Oct … GMT 秒" のような文にしない）。
+func retryAfterText(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "しばらく"
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return strconv.Itoa(n) + " 秒"
+	}
+	return fmt.Sprintf("しばらく（Retry-After: %q）", v)
+}
+
 // do は Slack API を 1 回呼ぶ。**HTTP リクエストを発行する唯一の場所**。
 //
 // 🚨 ここを増やさないこと。ホスト固定・allowlist・資格情報の載せ方は、この 1 箇所に
@@ -182,7 +225,8 @@ func (c *Client) do(ctx context.Context, m Method, params url.Values) (json.RawM
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	// 上限 +1 まで読み、超えたかどうかを判定できるようにする（上限ちょうどで切ると区別できない）。
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, err
 	}
@@ -192,21 +236,18 @@ func (c *Client) do(ctx context.Context, m Method, params url.Values) (json.RawM
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, &APIError{Method: m.name, Code: "invalid_auth"}
 	case http.StatusTooManyRequests:
-		retry := resp.Header.Get("Retry-After")
-		if retry == "" {
-			retry = "しばらく"
-		} else {
-			retry += " 秒"
-		}
-		return nil, fmt.Errorf("レート制限（429）: %s。%s待って再実行してください", m.name, retry)
+		return nil, fmt.Errorf("レート制限（429）: %s。%s待って再実行してください", m.name, retryAfterText(resp.Header.Get("Retry-After")))
 	default:
 		return nil, fmt.Errorf("予期しないステータス %d（%s）", resp.StatusCode, m.name)
+	}
+	if int64(len(raw)) > maxResponseBytes {
+		return nil, &ResponseTooLargeError{Method: m.name, Limit: maxResponseBytes}
 	}
 
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// HTML が返る = ログインページ等（セッション切れ）の可能性が高い。
-		return nil, fmt.Errorf("JSON ではない応答を受け取りました（%s）。Chrome で再ログインしてから試してください", m.name)
+		return nil, &NotJSONError{Method: m.name}
 	}
 	if !env.OK {
 		code := env.Error
@@ -234,9 +275,15 @@ func (c *Client) call(ctx context.Context, m Method, params url.Values, v any) (
 
 // nextCursor は cursor ページングの次カーソルを取り出す。
 func nextCursor(raw json.RawMessage) string {
+	cursor, _ := pageState(raw)
+	return cursor
+}
+
+// pageState は次カーソルと has_more を取り出す。
+func pageState(raw json.RawMessage) (cursor string, hasMore bool) {
 	var env envelope
 	if json.Unmarshal(raw, &env) != nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(env.ResponseMetadata.NextCursor)
+	return strings.TrimSpace(env.ResponseMetadata.NextCursor), env.HasMore
 }

@@ -38,6 +38,10 @@ func localStorageDir(profile string) (string, error) {
 	}
 	dir := filepath.Join(base, "Local Storage", "leveldb")
 	if _, err := os.Stat(dir); err != nil {
+		// 🚨 アクセス拒否を「見つからない」に化けさせない。
+		if os.IsPermission(err) {
+			return "", diskAccessError("Local Storage ", dir, err)
+		}
 		return "", fmt.Errorf(
 			"Local Storage が見つかりませんでした（プロファイル=%q）。探した場所:\n  %s\n"+
 				"  - プロファイル名が正しいか確認してください（-profile / SLACK_CLI_CHROME_PROFILE）。",
@@ -51,37 +55,59 @@ func localStorageDir(profile string) (string, error) {
 // 🚨 コピーの中身には xoxc トークンが含まれる。Cookie DB と同じ後始末の機構
 // （cleanup.go の 3 段構え）に必ず載せること。別経路で os.MkdirTemp すると、
 // その残骸はシグナル経路にも起動時の掃除にも拾われない。
-func copyLevelDB(src string) (string, func(), error) {
+//
+// 戻り値の skippedReads は読めずに飛ばしたファイルの記録（目的のものが見つからなかったときに添える）。
+func copyLevelDB(src string) (string, func(), skippedReads, error) {
 	tmpdir, cleanup, err := newTempDir()
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	entries, err := os.ReadDir(src)
 	if err != nil {
 		cleanup()
 		if os.IsPermission(err) {
-			return "", nil, fmt.Errorf(
-				"Local Storage を読み取れませんでした（アクセス拒否）。\n"+
-					"  ターミナル（またはこのツールを起動しているアプリ）に「フルディスクアクセス」を付与してください:\n"+
-					"    システム設定 → プライバシーとセキュリティ → フルディスクアクセス\n"+
-					"  対象: %s", src)
+			return "", nil, nil, diskAccessError("Local Storage ", src, err)
 		}
-		return "", nil, fmt.Errorf("Local Storage の読み取りに失敗: %w", err)
+		return "", nil, nil, fmt.Errorf("Local Storage の読み取りに失敗: %w", err)
 	}
+	var skipped skippedReads
 	for _, e := range entries {
 		if e.IsDir() {
 			continue // leveldb は平坦。サブディレクトリは読まない
 		}
 		data, err := os.ReadFile(filepath.Join(src, e.Name()))
 		if err != nil {
-			continue // ロック中のファイル等は飛ばす（取れたものだけで走査する）
+			// 取れたものだけで走査する。ただし ENOENT（列挙後に消えた）以外は記録する。
+			skipped.add(err)
+			continue
 		}
 		if err := os.WriteFile(filepath.Join(tmpdir, e.Name()), data, 0o600); err != nil {
 			cleanup()
-			return "", nil, err
+			return "", nil, nil, err
 		}
 	}
-	return tmpdir, cleanup, nil
+	return tmpdir, cleanup, skipped, nil
+}
+
+// walkCopiedFiles は copyLevelDB が作ったコピーの各ファイルを fn に渡す。
+// 読めなかったもの（ENOENT 以外）は skipped に記録して続行する。
+func walkCopiedFiles(dir string, skipped *skippedReads, fn func([]byte)) {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			skipped.add(err)
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			skipped.add(rerr)
+			return nil
+		}
+		fn(data)
+		return nil
+	})
 }
 
 // scanTokens は 1 ファイル分のバイト列から xoxc トークンを拾い、
@@ -175,28 +201,22 @@ func ExtractTokens(profile, workspace string) ([]TokenCandidate, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir, cleanup, err := copyLevelDB(src)
+	dir, cleanup, skipped, err := copyLevelDB(src)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup() // ①: 正常終了・エラー・panic を覆う
 
 	tc := newTokenCollector()
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
+	walkCopiedFiles(dir, &skipped, func(data []byte) { tc.add(data, workspace) })
+	out := tc.result()
+	if len(out) == 0 {
+		// 🚨 読めなかったファイルがあるのに「トークンが無い」（ErrNoToken）にしない。
+		if err := skipped.asError("Slack のトークン（xoxc-…）"); err != nil {
+			return nil, err
 		}
-		data, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return nil
-		}
-		tc.add(data, workspace)
-		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
-	return tc.result(), nil
+	return out, nil
 }
 
 // ErrNoToken は leveldb から 1 つも xoxc トークンを取り出せなかったことを表す。

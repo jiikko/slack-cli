@@ -56,24 +56,15 @@ func cmdSetup(args []string) error {
 
 	// 1. プロファイルごとにワークスペース候補を集める（ローカルのみ）。
 	fmt.Printf("%s のプロファイルを調べています...\n", auth.ChromeName)
-	type cand struct {
-		profile string
-		email   string
-		hints   []auth.WorkspaceHint
-	}
-	var cands []cand
-	for _, p := range auth.ListProfiles() {
-		hints, err := auth.DiscoverWorkspaces(p.Dir)
-		if err != nil || len(hints) == 0 {
-			continue
-		}
-		cands = append(cands, cand{profile: p.Dir, email: p.Email, hints: hints})
+	cands, issues, err := scanProfiles(false)
+	if err != nil {
+		return err
 	}
 	if len(cands) == 0 {
 		return fmt.Errorf(
 			"Slack にログイン済みの %s プロファイルが見つかりませんでした。\n"+
-				"  %s で対象の Slack ワークスペースを開いてから、もう一度実行してください。",
-			auth.ChromeName, auth.ChromeName)
+				"  %s で対象の Slack ワークスペースを開いてから、もう一度実行してください。%s",
+			auth.ChromeName, auth.ChromeName, auth.IssueNote(issues))
 	}
 
 	fmt.Println("\n見つかったプロファイルとワークスペース:")

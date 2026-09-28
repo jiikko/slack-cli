@@ -158,13 +158,21 @@ func configInit(args []string) error {
 
 	// 1. workspace が未設定なら、ローカルの痕跡から候補を出す。
 	if strings.TrimSpace(cfg.Workspace) == "" {
-		hints, profile := discoverWorkspaces()
+		found, issues, err := scanProfiles(true)
+		if err != nil {
+			return err
+		}
+		var hints []auth.WorkspaceHint
+		var profile string
+		if len(found) > 0 {
+			hints, profile = found[0].hints, found[0].profile
+		}
 		switch {
 		case len(hints) == 0:
 			return fmt.Errorf(
 				"ログイン済みのワークスペースを検出できませんでした。\n"+
 					"  %s で対象の Slack ワークスペースを開いてから、もう一度実行してください。\n"+
-					"  分かっている場合は直接指定できます: slack config set workspace <name>", auth.ChromeName)
+					"  分かっている場合は直接指定できます: slack config set workspace <name>%s", auth.ChromeName, auth.IssueNote(issues))
 		case len(hints) == 1:
 			cfg.Workspace = hints[0].Domain
 			fmt.Printf("ワークスペースを検出しました: %s（プロファイル %s）\n", cfg.Workspace, profile)
@@ -196,17 +204,46 @@ func configInit(args []string) error {
 	return nil
 }
 
-// discoverWorkspaces は全プロファイルを走査して、ワークスペース候補を集める。
-// 返り値の 2 つ目は、候補が見つかったプロファイル名。
-func discoverWorkspaces() ([]auth.WorkspaceHint, string) {
+// profileHints は 1 プロファイル分のワークスペース候補。
+type profileHints struct {
+	profile string
+	email   string
+	hints   []auth.WorkspaceHint
+}
+
+// scanProfiles は全プロファイルを走査してワークスペース候補を集める（ローカルのみ）。
+// firstOnly なら候補が見つかった最初のプロファイルで止める。
+//
+// 🚨 読み取りの失敗（アクセス拒否・読めないファイル）は記録して次のプロファイルへ進む。
+// 止めると、1 プロファイルだけ読めない（chmod 000 / sudo で起動した Chrome が root 所有にした）
+// ときに、後ろの正常なプロファイルが使えない。握り潰すと、全滅したときに
+// 「ログイン済みのプロファイルが無い」という別の案内に化ける。全滅時は IssueNote を添えること。
+//
+// 🚨 EnvError（作業領域の異常など、全プロファイル共通の問題）だけはその場で返す。
+// 捨てると全プロファイルが同じ理由で失敗し、「ログインしてから」という別の案内に化ける。
+func scanProfiles(firstOnly bool) ([]profileHints, []auth.ProfileIssue, error) {
+	var out []profileHints
+	var issues []auth.ProfileIssue
 	for _, p := range auth.ListProfiles() {
 		hints, err := auth.DiscoverWorkspaces(p.Dir)
-		if err != nil || len(hints) == 0 {
+		if err != nil {
+			if auth.IsEnvError(err) {
+				return nil, nil, err
+			}
+			if is, ok := auth.AsProfileIssue(p.Dir, err); ok {
+				issues = append(issues, is)
+			}
+			continue // Local Storage が無い等は「候補なし」
+		}
+		if len(hints) == 0 {
 			continue
 		}
-		return hints, p.Dir
+		out = append(out, profileHints{profile: p.Dir, email: p.Email, hints: hints})
+		if firstOnly {
+			break
+		}
 	}
-	return nil, ""
+	return out, issues, nil
 }
 
 // printJSON は JSON 出力の共通口。

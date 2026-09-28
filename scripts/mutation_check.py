@@ -116,7 +116,7 @@ MUTATIONS = [
 
 
     ("一時ディレクトリをシグナル経路に登録しない", "internal/auth/cleanup.go",
-     "\tregisterCleanup(d)", "",
+     "\tcleanupPaths[d] = struct{}{}\n", "",
      "./internal/auth/", "TestTempDirIsRemovedByBothPaths"),
 
     ("作業領域の名前を他ツールと共有する", "internal/auth/cleanup.go",
@@ -146,7 +146,7 @@ MUTATIONS = [
      "./internal/config/", "TestEveryKeyRoundTrips"),
 
     ("ページング打ち切りを無音で握り潰す（チャンネル）", "internal/slack/api.go",
-     '\treturn out, &TruncatedError{Method: MethodConversationsList.String(), Pages: maxPages, Count: len(out)}',
+     '\treturn out, &TruncatedError{Method: MethodConversationsList.String(), Pages: maxPages, Count: len(out), Hint: truncHintChannels}',
      '\treturn out, nil',
      "./internal/slack/", "TestChannelsReportsTruncation"),
 
@@ -206,7 +206,7 @@ MUTATIONS = [
      "./internal/auth/", "TestSweepRefusesRelativeSymlinkRoot"),
 
     ("①の後始末をパス文字列の os.RemoveAll に戻す", "internal/auth/cleanup.go",
-     '\treturn d, func() { _ = removeVerified(filepath.Base(d)) }, nil',
+     '\treturn d, func() { _, _ = removeVerified(filepath.Base(d)) }, nil',
      '\treturn d, func() { os.RemoveAll(d) }, nil',
      "./internal/auth/", "TestDeferCleanupRefusesUnverifiedRoot"),
 
@@ -275,7 +275,273 @@ MUTATIONS = [
      '\t\t\tresetFunc(func() {}),',
      "./internal/auth/", "TestSignalHandlerPassesRealReset"),
 
+    # --- 2026-09-28: ページング / 後始末の窓 / 候補探索の分類 ---
+    ("replies を 1 回で終わらせる（新しい側の返信が欠ける形へ戻す）", "internal/slack/api.go",
+     '\t\tvar hasMore bool\n',
+     '\t\tif true {\n\t\t\treturn out, nil\n\t\t}\n\t\tvar hasMore bool\n',
+     "./internal/slack/", "TestRepliesPagesUntilLimit"),
+
+    ("history を 1 回で終わらせる", "internal/slack/api.go",
+     '\t\tvar hasMore bool\n',
+     '\t\tif true {\n\t\t\treturn out, nil\n\t\t}\n\t\tvar hasMore bool\n',
+     "./internal/slack/", "TestHistoryPagesUntilLimit"),
+
+    ("短いページを最後のページと早合点する", "internal/slack/api.go",
+     '\t\tvar hasMore bool\n',
+     '\t\tif len(resp.Messages) < want {\n\t\t\treturn out, nil\n\t\t}\n\t\tvar hasMore bool\n',
+     "./internal/slack/", "TestShortPagesAreFollowed"),
+
+    ("1 回あたりの limit を -n のまま送る（API 上限を超える）", "internal/slack/api.go",
+     '\t\tparams.Set("limit", strconv.Itoa(min(want, messagePageLimit)))',
+     '\t\tparams.Set("limit", strconv.Itoa(want))',
+     "./internal/slack/", "TestHistoryPagesUntilLimit"),
+
+    ("1 ページの limit を 200 に戻す（-n 1000 で 5 回呼ぶ）", "internal/slack/api.go",
+     'const messagePageLimit = 1000', 'const messagePageLimit = 200',
+     "./internal/slack/", "TestSmallLimitIsSingleCall"),
+
+    ("ts の重複除去をやめる（replies の親の再掲を二重に出す）", "internal/slack/api.go",
+     '\t\t\t\tif seen[msg.Ts] {\n\t\t\t\t\tcontinue\n\t\t\t\t}\n',
+     '',
+     "./internal/slack/", "TestRepliesDedupesRepeatedParent"),
+
+    ("2 ページ目以降に 1 件多く頼むのをやめる（親の再掲で空回りする）", "internal/slack/api.go",
+     '\t\t\twant++\n', '',
+     "./internal/slack/", "TestRepliesDedupesRepeatedParent"),
+
+    ("has_more なのにカーソルが空を完了扱いにする", "internal/slack/api.go",
+     '\t\t\tif hasMore {', '\t\t\tif false && hasMore {',
+     "./internal/slack/", "TestHasMoreWithoutCursorIsTruncation"),
+
+    ("メッセージのページング打ち切りを無音で握り潰す", "internal/slack/api.go",
+     '\treturn out, &TruncatedError{Method: m.String(), Pages: maxPages, Count: len(out), Hint: hint}',
+     '\t_ = hint\n\treturn out, nil',
+     "./internal/slack/", "TestMessagePagingReportsTruncation"),
+
+    ("途中失敗で取得済みページを捨てる（history / replies）", "internal/slack/api.go",
+     '\t\t\tif len(out) > 0 {\n\t\t\t\treturn out, &PartialError{Method: m.String(), Count: len(out), Err: err}\n\t\t\t}\n',
+     '',
+     "./internal/slack/", "TestMidPagingFailureReturnsPartial"),
+
+    ("途中失敗で取得済みページを捨てる（channels）", "internal/slack/api.go",
+     '\t\tif len(out) > 0 {\n\t\t\treturn out, &PartialError{Method: MethodConversationsList.String(), Count: len(out), Err: err}\n\t\t}\n',
+     '',
+     "./internal/slack/", "TestMidPagingFailureReturnsPartial"),
+
+    ("途中失敗で取得済みページを捨てる（users）", "internal/slack/api.go",
+     '\t\t\tif len(out) > 0 {\n\t\t\t\treturn out, &PartialError{Method: MethodUsersList.String(), Count: len(out), Err: err}\n\t\t\t}\n',
+     '',
+     "./internal/slack/", "TestMidPagingFailureReturnsPartial"),
+
+    ("打ち切り案内から「-name では避けられない」を落とす（効かない回避策の案内へ戻す）", "internal/slack/api.go",
+     'Count: len(out), Hint: truncHintChannels}',
+     'Count: len(out)}',
+     "./internal/slack/", "TestTruncationHintDoesNotRecommendNameFilter"),
+
+    ("打ち切り・途中失敗を振り分けず取得分ごと捨てる（history）", "cmd/slack/history.go",
+     '\tmsgs, err := sess.Client.History(ctx, channelID, count, oldest, latest)\n\tafter, err := splitListErr(err)',
+     '\tmsgs, err := sess.Client.History(ctx, channelID, count, oldest, latest)\n\tvar after error',
+     "./cmd/slack/", "TestListCommandsHandleTruncation"),
+
+    ("途中失敗を完了扱い（rc=0）にする", "cmd/slack/main.go",
+     '\tcase slack.IsPartial(err):\n\t\treturn err, nil',
+     '\tcase slack.IsPartial(err):\n\t\treturn nil, nil',
+     "./cmd/slack/", "TestSplitListErr"),
+
+    ("部分結果を出力した後に途中失敗を返さない", "cmd/slack/main.go",
+     '\tfmt.Print(render())\n\treturn after',
+     '\tfmt.Print(render())\n\treturn nil',
+     "./cmd/slack/", "TestFinishListRendersThenReturnsAfter"),
+
+    ("②で「終了中」を立てない", "internal/auth/cleanup.go",
+     '\tcleanupClosing = true\n', '',
+     "./internal/auth/", "TestSignalShutdownRefusesNewTempDirs"),
+
+    ("終了中でも newTempDir が作る", "internal/auth/cleanup.go",
+     '\tif cleanupClosing {\n\t\tcleanupMu.Unlock()\n\t\treturn "", nil, tempRootError(errCleanupClosing)\n\t}',
+     '',
+     "./internal/auth/", "TestSignalShutdownRefusesNewTempDirs"),
+
+    ("作成と登録の間でロックを外す", "internal/auth/cleanup.go",
+     '\tif afterMkdir != nil {\n\t\tafterMkdir()\n\t}\n\tcleanupPaths[d] = struct{}{}\n\tcleanupMu.Unlock()',
+     '\tcleanupMu.Unlock()\n\tif afterMkdir != nil {\n\t\tafterMkdir()\n\t}\n\tcleanupMu.Lock()\n\tcleanupPaths[d] = struct{}{}\n\tcleanupMu.Unlock()',
+     "./internal/auth/", "TestTempDirCreationAndRegistrationAreAtomic"),
+
+    ("シグナルハンドラへ RunAllCleanups を渡す（終了中を立てない）", "internal/auth/cleanup.go",
+     '\t\t\tcleanupFunc(shutdownCleanups),',
+     '\t\t\tcleanupFunc(RunAllCleanups),',
+     "./internal/auth/", "TestSignalHandlerPassesShutdownCleanups"),
+
+    ("削除の前に登録簿から消す（失敗したものを再試行しない）", "internal/auth/cleanup.go",
+     '\t\tbyName[filepath.Base(p)] = p\n',
+     '\t\tbyName[filepath.Base(p)] = p\n\t\tdelete(cleanupPaths, p)\n',
+     "./internal/auth/", "TestFailedCleanupIsRetried"),
+
+    ("削除に失敗した名前も removed に入れる", "internal/auth/cleanup.go",
+     '\t\t\t\tfirstErr = err\n\t\t\t}\n\t\t\tcontinue\n\t\t}\n\t\tremoved = append(removed, name)',
+     '\t\t\t\tfirstErr = err\n\t\t\t}\n\t\t}\n\t\tremoved = append(removed, name)',
+     "./internal/auth/", "TestRemoveVerifiedReportsOnlySuccesses"),
+
+    ("ログインページをネットワーク障害と同じく即 return する", "internal/slack/resolve.go",
+     '\treturn errors.As(err, &apiErr) || errors.As(err, &notJSON)',
+     '\treturn errors.As(err, &apiErr) || (false && errors.As(err, &notJSON))',
+     "./internal/slack/", "TestResolveTriesNextProfileAfterLoginPage"),
+
+    ("応答を上限で黙って切り詰める", "internal/slack/client.go",
+     '\traw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))',
+     '\traw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))',
+     "./internal/slack/", "TestOversizedResponseIsReported"),
+
+    ("上限ちょうどの応答を拒否する（境界の取り違え）", "internal/slack/client.go",
+     '\tif int64(len(raw)) > maxResponseBytes {',
+     '\tif int64(len(raw)) >= maxResponseBytes {',
+     "./internal/slack/", "TestOversizedResponseIsReported"),
+
+    ("Retry-After の HTTP-date にも「秒」を付ける", "internal/slack/client.go",
+     '\treturn fmt.Sprintf("しばらく（Retry-After: %q）", v)',
+     '\treturn v + " 秒"',
+     "./internal/slack/", "TestRetryAfterFormats"),
+
+    ("Keychain の失敗で次のプロファイルへ進む（EnvError で止めない）", "internal/slack/resolve.go",
+     '\tif auth.IsEnvError(err) {\n\t\treturn err\n\t}\n\tif is, ok',
+     '\tif is, ok',
+     "./internal/slack/", "TestResolveStopsOnEnvironmentError"),
+
+    ("読み取りの問題で探索全体を止める（後ろの正常なプロファイルを使わない）", "internal/slack/resolve.go",
+     '\tif auth.IsEnvError(err) {\n\t\treturn err\n\t}\n\tif is, ok',
+     '\tif _, ok := auth.AsProfileIssue(profile, err); auth.IsEnvError(err) || ok {\n\t\treturn err\n\t}\n\tif is, ok',
+     "./internal/slack/", "TestResolveContinuesPastUnreadableProfile"),
+
+    ("読めなかったプロファイルを記録しない（全滅時の案内が消える）", "internal/slack/resolve.go",
+     '\t\tfi.issues = append(fi.issues, is)\n', '\t\t_ = is\n',
+     "./internal/slack/", "TestResolveReportsReadIssuesWhenAllFail"),
+
+    ("Keychain の失敗を EnvError 以外で返す", "internal/auth/keychain_darwin.go",
+     '\t\treturn nil, &EnvError{', '\t\treturn nil, &ReadError{Kind: ReadDenied, ',
+     "./internal/auth/", "TestKeychainFailureIsEnvError"),
+
+    ("アクセス拒否を EnvError にする（探索全体が止まる形へ戻す）", "internal/auth/enverror.go",
+     '\treturn &ReadError{Kind: ReadDenied, Msg:', '\treturn &EnvError{Msg:',
+     "./internal/auth/", "TestPermissionDeniedIsReadDeniedNotMissing"),
+
+    ("Cookie DB の Stat のアクセス拒否を「見つからない」にする", "internal/auth/cookie.go",
+     '\t\tif os.IsPermission(err) {\n\t\t\treturn "", diskAccessError("Cookie DB ", c, err)\n\t\t}\n',
+     '',
+     "./internal/auth/", "TestPermissionDeniedIsReadDeniedNotMissing"),
+
+    ("Local Storage の Stat のアクセス拒否を「見つからない」にする", "internal/auth/token.go",
+     '\t\tif os.IsPermission(err) {\n\t\t\treturn "", diskAccessError("Local Storage ", dir, err)\n\t\t}\n',
+     '',
+     "./internal/auth/", "TestPermissionDeniedIsReadDeniedNotMissing"),
+
+    ("Cookie DB コピー時のアクセス拒否を素のエラーに戻す", "internal/auth/cookie.go",
+     '\t\t\t\t\treturn "", nil, nil, diskAccessError("Cookie DB ", src, err)',
+     '\t\t\t\t\treturn "", nil, nil, fmt.Errorf("Cookie DB を読み取れませんでした（アクセス拒否）: %s", src)',
+     "./internal/auth/", "TestCopyPermissionDeniedIsReadDenied"),
+
+    ("Local Storage コピー時のアクセス拒否を素のエラーに戻す", "internal/auth/token.go",
+     '\t\t\treturn "", nil, nil, diskAccessError("Local Storage ", src, err)',
+     '\t\t\treturn "", nil, nil, fmt.Errorf("Local Storage を読み取れませんでした（アクセス拒否）: %s", src)',
+     "./internal/auth/", "TestCopyPermissionDeniedIsReadDenied"),
+
+    ("-wal / -shm の読み取り失敗を黙って捨てる", "internal/auth/cookie.go",
+     '\t\t\tskipped.add(err)\n\t\t\tcontinue\n', '\t\t\tcontinue\n',
+     "./internal/auth/", "TestUnreadableWALIsRecorded"),
+
+    ("存在しない -shm まで記録する（ENOENT を除かない）", "internal/auth/enverror.go",
+     '\tif err == nil || errors.Is(err, fs.ErrNotExist) {', '\tif err == nil || (false && errors.Is(err, fs.ErrNotExist)) {',
+     "./internal/auth/", "TestUnreadableWALIsRecorded"),
+
+    ("leveldb の個別ファイルの読み取り失敗を黙って捨てる", "internal/auth/token.go",
+     '\t\t\tskipped.add(err)\n\t\t\tcontinue\n', '\t\t\tcontinue\n',
+     "./internal/auth/", "TestUnreadableLevelDBFilesAreReported"),
+
+    ("トークンが無いとき、読めなかったファイルを添えない", "internal/auth/token.go",
+     '\t\tif err := skipped.asError("Slack のトークン（xoxc-…）"); err != nil {\n\t\t\treturn nil, err\n\t\t}\n',
+     '',
+     "./internal/auth/", "TestUnreadableLevelDBFilesAreReported"),
+
+    ("トークンが取れていても読めないファイルがあれば失敗にする", "internal/auth/token.go",
+     '\tout := tc.result()\n\tif len(out) == 0 {',
+     '\tout := tc.result()\n\tif true {',
+     "./internal/auth/", "TestUnreadableLevelDBFilesAreReported"),
+
+    ("ワークスペースの痕跡が無いとき、読めなかったファイルを添えない", "internal/auth/discover.go",
+     '\t\tif err := skipped.asError("ワークスペースの痕跡"); err != nil {\n\t\t\treturn nil, err\n\t\t}\n',
+     '',
+     "./internal/auth/", "TestUnreadableLevelDBFilesAreReported"),
+
+    ("復号の全件失敗を検出しない（cookie が無いに化ける）", "internal/auth/cookie.go",
+     'func (d decryptStats) allFailed() bool { return d.tried > 0 && d.failed == d.tried }',
+     'func (d decryptStats) allFailed() bool { return false }',
+     "./internal/auth/", "TestDecryptFailuresAreReported"),
+
+    ("1 件の復号失敗で全件失敗扱いにする", "internal/auth/cookie.go",
+     'func (d decryptStats) allFailed() bool { return d.tried > 0 && d.failed == d.tried }',
+     'func (d decryptStats) allFailed() bool { return d.failed > 0 }',
+     "./internal/auth/", "TestDecryptFailuresAreReported"),
+
+    ("d cookie が無いとき、読めなかったファイルを添えない", "internal/auth/cookie.go",
+     '\tif err := skipped.asError(fmt.Sprintf("%s 宛ての %q cookie ", host, slackCookieName)); err != nil {\n\t\treturn err\n\t}\n',
+     '',
+     "./internal/auth/", "TestDecryptFailuresAreReported"),
+
+    ("v24 の SHA256(host_key) 照合を外す（鍵違いのゴミが 1/256 で通る）", "internal/auth/cookie.go",
+     '\t\tif subtle.ConstantTimeCompare(plain[:sha256.Size], want[:]) != 1 {',
+     '\t\tif false && subtle.ConstantTimeCompare(plain[:sha256.Size], want[:]) != 1 {',
+     "./internal/auth/", "TestV24HashPrefixDetectsWrongKeyAtScale"),
+
+    ("照合の入力の host_key から先頭ドットを落とす（正常な cookie が全部失敗する）", "internal/auth/cookie.go",
+     '\t\twant := sha256.Sum256([]byte(hostKey))',
+     '\t\twant := sha256.Sum256([]byte(strings.TrimPrefix(hostKey, ".")))',
+     "./internal/auth/", "TestV24HashPrefixDetectsWrongKeyAtScale"),
+
+    ("作業領域の異常を素のエラーで返す（setup が「ログインしてから」に化ける）", "internal/auth/cleanup.go",
+     '\t\treturn "", nil, tempRootError(err)\n\t}\n\tcleanupMu.Lock()',
+     '\t\treturn "", nil, err\n\t}\n\tcleanupMu.Lock()',
+     "./internal/auth/", "TestTempRootFailureIsEnvError"),
+
+    ("終了処理中を素のエラーで返す", "internal/auth/cleanup.go",
+     '\t\treturn "", nil, tempRootError(errCleanupClosing)',
+     '\t\treturn "", nil, errCleanupClosing',
+     "./internal/auth/", "TestTempRootFailureIsEnvError"),
+
+    ("ワークスペース検出で作業領域の異常を候補なしに畳む", "cmd/slack/config_cmd.go",
+     '\t\t\tif auth.IsEnvError(err) {\n\t\t\t\treturn nil, nil, err\n\t\t\t}\n',
+     '',
+     "./cmd/slack/", "TestDiscoveryStopsOnTempRootFailure"),
+
+    ("JSON 出力のときに途中失敗を返さない", "cmd/slack/main.go",
+     '\t\tif err := printJSON(items); err != nil {\n\t\t\treturn err\n\t\t}\n\t\treturn after',
+     '\t\tif err := printJSON(items); err != nil {\n\t\t\treturn err\n\t\t}\n\t\treturn nil',
+     "./cmd/slack/", "TestFinishListRendersThenReturnsAfter"),
+
+    ("0 件のときに途中失敗を返さない", "cmd/slack/main.go",
+     '\t\tfmt.Fprintln(os.Stderr, "0 件")\n\t\treturn after',
+     '\t\tfmt.Fprintln(os.Stderr, "0 件")\n\t\treturn nil',
+     "./cmd/slack/", "TestFinishListRendersThenReturnsAfter"),
+
+    ("コマンドが finishList に after を渡さない（channels）", "cmd/slack/channels.go",
+     '\treturn finishList(cfg.JSON, channels, func() string { return channelColumns.Render(channels, cols, !noHeader) }, after)',
+     '\t_ = after\n\treturn finishList(cfg.JSON, channels, func() string { return channelColumns.Render(channels, cols, !noHeader) }, nil)',
+     "./cmd/slack/", "TestListCommandsHandleTruncation"),
+
+    ("別ワークスペースが見つかった分岐で読み取りの問題の案内を落とす", "internal/slack/resolve.go",
+     '\t\tb.WriteString(scope)',
+     '\t\tb.WriteString(profileScopeNote(profiles, profileFixed))',
+     "./internal/slack/", "TestResolveReportsReadIssuesWhenAllFail"),
+
+    ("ワークスペース検出で読めないプロファイルを記録しない", "cmd/slack/config_cmd.go",
+     '\t\t\t\tissues = append(issues, is)\n', '\t\t\t\t_ = is\n',
+     "./cmd/slack/", "TestDiscoverySkipsUnreadableProfile"),
+
+    ("ワークスペース検出で読めないプロファイルに当たったら止める", "cmd/slack/config_cmd.go",
+     '\t\t\tcontinue // Local Storage が無い等は「候補なし」',
+     '\t\t\tbreak',
+     "./cmd/slack/", "TestDiscoverySkipsUnreadableProfile"),
+
 ]
+
 
 # COMPILE_GUARDED は「型で閉じている」ことを確かめる変異。
 #
@@ -284,8 +550,8 @@ MUTATIONS = [
 # （名前: ファイル, 置換前, 置換後）
 COMPILE_GUARDED = [
     ("シグナルハンドラの reset と cleanup を入れ替える", "internal/auth/cleanup.go",
-     '\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),\n\t\t\tcleanupFunc(RunAllCleanups),',
-     '\t\t\tcleanupFunc(RunAllCleanups),\n\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),'),
+     '\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),\n\t\t\tcleanupFunc(shutdownCleanups),',
+     '\t\t\tcleanupFunc(shutdownCleanups),\n\t\t\tresetFunc(func() { signal.Reset(cleanupSignals...) }),'),
 ]
 
 

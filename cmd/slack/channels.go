@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 
 	"github.com/jiikko/slack-cli/internal/config"
 	"github.com/jiikko/slack-cli/internal/slack"
@@ -69,12 +67,9 @@ func cmdChannels(args []string) error {
 		fetch = 0
 	}
 	channels, err := sess.Client.Channels(context.Background(), types, fetch)
+	after, err := splitListErr(err)
 	if err != nil {
-		// 🚨 打ち切りは「結果はあるが不完全」。黙って完全な一覧に見せない。
-		if !slack.IsTruncated(err) {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "警告: %v\n", err)
+		return err
 	}
 	if nameFilter != "" {
 		var filtered []slack.Channel
@@ -89,13 +84,5 @@ func cmdChannels(args []string) error {
 		}
 	}
 
-	if cfg.JSON {
-		return printJSON(channels)
-	}
-	if len(channels) == 0 {
-		fmt.Fprintln(os.Stderr, "0 件")
-		return nil
-	}
-	fmt.Print(channelColumns.Render(channels, cols, !noHeader))
-	return nil
+	return finishList(cfg.JSON, channels, func() string { return channelColumns.Render(channels, cols, !noHeader) }, after)
 }

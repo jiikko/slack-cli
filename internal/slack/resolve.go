@@ -80,45 +80,48 @@ func Resolve(ctx context.Context, cfg config.Config, creds Credentials, stderr i
 		creds = ChromeCredentials{}
 	}
 
-	// 別ワークスペースのトークンが見つかった記録（エラー時の案内に使う）。
-	seenElsewhere := map[string]string{} // domain -> 表示名
-	var lastErr error
-	triedToken := 0
-
 	profiles := candidateProfiles(cfg, ws, creds)
-	// プロファイルが固定されているか（固定だと「そのプロファイルの中だけ」を探す）。
-	profileFixed := strings.TrimSpace(cfg.Profile) != "" && cfg.Profile != auth.ProfileAuto
+	fi := failureInfo{
+		ws:            ws,
+		seenElsewhere: map[string]string{},
+		profiles:      profiles,
+		// プロファイルが固定されているか（固定だと「そのプロファイルの中だけ」を探す）。
+		profileFixed: strings.TrimSpace(cfg.Profile) != "" && cfg.Profile != auth.ProfileAuto,
+	}
 
 	for _, profile := range profiles {
 		cookie, err := creds.Cookie(profile, host)
 		if err != nil {
-			lastErr = err
-			continue // その プロファイルには Slack の cookie が無い
+			if err := fi.record(profile, err); err != nil {
+				return nil, err
+			}
+			continue // その プロファイルには Slack の cookie が無い / 読めない
 		}
 
 		tokens, err := tokensFor(cfg, creds, profile, ws)
 		if err != nil {
-			lastErr = err
+			if err := fi.record(profile, err); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if len(tokens) == 0 {
-			lastErr = &auth.ErrNoToken{Profile: profile}
+			fi.lastErr = &auth.ErrNoToken{Profile: profile}
 			continue
 		}
 
 		for _, token := range tokens {
 			c, err := New(ws, token, cookie, opts...)
 			if err != nil {
-				lastErr = err
+				fi.lastErr = err
 				continue
 			}
-			triedToken++
+			fi.triedToken++
 			at, err := c.AuthTest(ctx)
 			if err != nil {
-				var apiErr *APIError
-				if errors.As(err, &apiErr) {
-					// そのトークンが無効なだけかもしれないので次の候補へ。
-					lastErr = err
+				if isCandidateRejection(err) {
+					// そのトークン / cookie が無効なだけかもしれないので次の候補へ。
+					fi.lastErr = err
 					continue
 				}
 				// ネットワーク障害等は候補を変えても直らないので即座に返す。
@@ -135,12 +138,55 @@ func Resolve(ctx context.Context, cfg config.Config, creds Credentials, stderr i
 				return &Session{Client: c, Profile: profile, Auth: at}, nil
 			}
 			if domain != "" {
-				seenElsewhere[domain] = at.Team
+				fi.seenElsewhere[domain] = at.Team
 			}
 		}
 	}
 
-	return nil, resolveFailure(ws, seenElsewhere, triedToken, lastErr, profiles, profileFixed)
+	return nil, fi.failure()
+}
+
+// failureInfo は探索の途中経過（全候補が失敗したときの案内の材料）。
+type failureInfo struct {
+	ws            string
+	seenElsewhere map[string]string // 別ワークスペースのトークンが見つかった記録: domain -> 表示名
+	triedToken    int
+	lastErr       error
+	issues        []auth.ProfileIssue // 資格情報を読めなかったプロファイル
+	profiles      []string
+	profileFixed  bool
+}
+
+// record は資格情報の取り出しの失敗を記録する。戻り値が非 nil なら探索を止めて返す。
+//
+// 🚨 即座に止めるのは EnvError（Keychain の暗号鍵を取れない = 全プロファイル共通）だけ。
+// 読み取り拒否・復号失敗・読めないファイルは**プロファイル単位でも起きる**ので、記録して
+// 次へ進む（止めると後ろの正常なプロファイルが使えない）。全滅したら failure が案内に添える。
+func (fi *failureInfo) record(profile string, err error) error {
+	if auth.IsEnvError(err) {
+		return err
+	}
+	if is, ok := auth.AsProfileIssue(profile, err); ok {
+		fi.issues = append(fi.issues, is)
+	}
+	fi.lastErr = err
+	return nil
+}
+
+// failure は失敗時の案内を組み立てる。
+func (fi *failureInfo) failure() error {
+	return resolveFailure(fi.ws, fi.seenElsewhere, fi.triedToken, fi.lastErr, fi.issues, fi.profiles, fi.profileFixed)
+}
+
+// isCandidateRejection は「この候補（トークン / cookie）が受け付けられなかった」エラーかを返す。
+// true なら次の候補へ進む。false（ネットワーク障害・5xx 等）は候補を変えても直らないので即座に返す。
+//
+// 🚨 JSON ではない応答（ログインページ）は候補側の問題として扱う。その cookie のセッションが
+// 切れているだけで、後ろのプロファイルには有効なセッションがありうる。
+func isCandidateRejection(err error) bool {
+	var apiErr *APIError
+	var notJSON *NotJSONError
+	return errors.As(err, &apiErr) || errors.As(err, &notJSON)
 }
 
 // tokensFor は候補トークンを返す。明示指定があればそれだけ（ただし検証は同じ）。
@@ -195,7 +241,10 @@ func profileScopeNote(profiles []string, fixed bool) string {
 }
 
 // resolveFailure は失敗時の案内を組み立てる（仕様 §8）。
-func resolveFailure(ws string, seenElsewhere map[string]string, triedToken int, lastErr error, profiles []string, profileFixed bool) error {
+func resolveFailure(ws string, seenElsewhere map[string]string, triedToken int, lastErr error, issues []auth.ProfileIssue, profiles []string, profileFixed bool) error {
+	// 🚨 読み取れなかったプロファイルの記録を、どの分岐でも落とさない。
+	// 別の候補の失敗（認証が通らない等）で案内を組むと、本当の原因（権限・復号）が消える。
+	scope := auth.IssueNote(issues) + profileScopeNote(profiles, profileFixed)
 	if len(seenElsewhere) > 0 {
 		domains := make([]string, 0, len(seenElsewhere))
 		for d := range seenElsewhere {
@@ -214,26 +263,42 @@ func resolveFailure(ws string, seenElsewhere map[string]string, triedToken int, 
 		}
 		fmt.Fprintf(&b, "  対象を変えるなら:  slack config set workspace %s\n", domains[0])
 		fmt.Fprintf(&b, "  %q を使うなら Chrome で https://%s.slack.com にログインしてください。", ws, ws)
-		b.WriteString(profileScopeNote(profiles, profileFixed))
+		b.WriteString(scope)
 		return errors.New(b.String())
 	}
 	if triedToken > 0 {
 		return fmt.Errorf(
 			"Slack のトークンは見つかりましたが、いずれも認証が通りませんでした（%d 件試行）。\n"+
 				"  Chrome で https://%s.slack.com にログインし直してから再実行してください。\n"+
-				"  直前のエラー: %v%s", triedToken, ws, lastErr, profileScopeNote(profiles, profileFixed))
+				"  直前のエラー: %v%s", triedToken, ws, lastErr, scope)
 	}
 	if lastErr != nil {
-		if note := profileScopeNote(profiles, profileFixed); note != "" {
-			return fmt.Errorf("%v%s", lastErr, note)
+		if _, ok := auth.AsProfileIssue("", lastErr); ok {
+			// 直前のエラー自体が読み取りの問題なら、それは一覧（scope）に載っているので本文に重ねない。
+			return &wrappedError{
+				msg: fmt.Sprintf("%s から Slack の資格情報を取り出せませんでした。%s", auth.ChromeName, scope),
+				err: lastErr,
+			}
+		}
+		if scope != "" {
+			return fmt.Errorf("%w%s", lastErr, scope)
 		}
 		return lastErr
 	}
 	return fmt.Errorf(
 		"Chrome から Slack の資格情報を取り出せませんでした。\n"+
 			"  %s で https://%s.slack.com にログインしているか確認してください。%s",
-		auth.ChromeName, ws, profileScopeNote(profiles, profileFixed))
+		auth.ChromeName, ws, scope)
 }
+
+// wrappedError は案内文を差し替えつつ、元のエラーの型（errors.As）を保つ。
+type wrappedError struct {
+	msg string
+	err error
+}
+
+func (e *wrappedError) Error() string { return e.msg }
+func (e *wrappedError) Unwrap() error { return e.err }
 
 // 型の取り違えを防ぐための静的チェック（ChromeCredentials が Credentials を満たすこと）。
 var _ Credentials = ChromeCredentials{}

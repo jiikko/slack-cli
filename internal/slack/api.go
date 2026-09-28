@@ -85,19 +85,72 @@ type TruncatedError struct {
 	Method string
 	Pages  int
 	Count  int
+	// Hint は「実際に効く回避策」の案内（メソッドごとに違う）。
+	//
+	// 🚨 効かない回避策を勧めないこと。たとえば channels / users の -name は
+	// **全件を取得してから**絞り込むので、同じ上限に当たる（勧めても同じ警告が出るだけ）。
+	Hint string
+	// Stalled は「has_more=true なのに next_cursor が空」で続きを取れなかったことを表す
+	// （安全上限ではなく、API の応答のせいで止まった）。
+	Stalled bool
 }
 
 func (e *TruncatedError) Error() string {
-	return fmt.Sprintf(
-		"%s の一覧が %d ページ（%d 件）で打ち切られました。まだ続きがあります。\n"+
-			"  結果は不完全です。-name での絞り込みか、ID の直接指定を使ってください。",
+	msg := fmt.Sprintf(
+		"%s の取得が %d ページ（%d 件）で打ち切られました。まだ続きがあります。\n"+
+			"  結果は不完全です。",
 		e.Method, e.Pages, e.Count)
+	if e.Stalled {
+		msg = fmt.Sprintf(
+			"%s の取得が %d 件で止まりました。API は続きがある（has_more）と返しましたが、次のページのカーソルがありませんでした。\n"+
+				"  結果は不完全です。",
+			e.Method, e.Count)
+	}
+	if e.Hint != "" {
+		msg += "\n  " + e.Hint
+	}
+	return msg
 }
+
+// 打ち切り時の案内（TruncatedError.Hint）。
+const (
+	truncHintChannels = "-name は全件を取得してから絞り込むため、この上限は避けられません。\n" +
+		"  -types public_channel / -types private_channel のように種別を分けて取得すると上限に収まることがあります。\n" +
+		"  特定のチャンネルを使うだけなら、チャンネル ID（C…）を直接指定してください。"
+	truncHintUsers   = "users.list には API 側の絞り込みが無く、-name も全件を取得してから絞り込むため、この上限は避けられません。"
+	truncHintHistory = "-oldest / -latest で期間を絞るか、-n を減らしてください。"
+	truncHintReplies = "-n を減らしてください（スレッドは古い順に取得します）。"
+)
 
 // IsTruncated は err が打ち切り（結果は使えるが不完全）かを返す。
 func IsTruncated(err error) bool {
 	var te *TruncatedError
 	return errors.As(err, &te)
+}
+
+// PartialError はページングの途中（2 ページ目以降）で API 呼び出しが失敗したことを表す。
+// 呼び出し側には取得済みの分が返る。
+//
+// 🚨 TruncatedError と区別すること。打ち切り（安全上限）は「完了扱いで警告」だが、
+// 途中失敗（429 / 5xx / 通信断）は**完了ではない**ので、部分結果を出したうえで非 0 で終わる。
+// また途中失敗で `return nil, err` にしないこと。取得済みページを捨てると、ページングで
+// 呼び出し回数が増えた分だけ、1 回で取っていた頃より悪くなる。
+type PartialError struct {
+	Method string
+	Count  int // 取得済みの件数
+	Err    error
+}
+
+func (e *PartialError) Error() string {
+	return fmt.Sprintf("%s の取得が途中で失敗しました（取得済み %d 件。結果は不完全です）: %v", e.Method, e.Count, e.Err)
+}
+
+func (e *PartialError) Unwrap() error { return e.Err }
+
+// IsPartial は err が途中失敗（結果は一部だけ）かを返す。
+func IsPartial(err error) bool {
+	var pe *PartialError
+	return errors.As(err, &pe)
 }
 
 // forEachChannelPage は conversations.list を 1 ページずつ取り出して fn に渡す。
@@ -149,6 +202,9 @@ func (c *Client) Channels(ctx context.Context, types string, limit int) ([]Chann
 		return !(limit > 0 && len(out) >= limit) // 必要数に達したら打ち切る
 	})
 	if err != nil {
+		if len(out) > 0 {
+			return out, &PartialError{Method: MethodConversationsList.String(), Count: len(out), Err: err}
+		}
 		return nil, err
 	}
 	if limit > 0 && len(out) > limit {
@@ -156,7 +212,7 @@ func (c *Client) Channels(ctx context.Context, types string, limit int) ([]Chann
 	}
 	if truncated {
 		// データは返すが、不完全だと伝える。
-		return out, &TruncatedError{Method: MethodConversationsList.String(), Pages: maxPages, Count: len(out)}
+		return out, &TruncatedError{Method: MethodConversationsList.String(), Pages: maxPages, Count: len(out), Hint: truncHintChannels}
 	}
 	return out, nil
 }
@@ -233,34 +289,97 @@ func looksLikeChannelID(s string) bool {
 	return true
 }
 
-// History は conversations.history を呼ぶ。
+// messagePageLimit は conversations.history / replies の 1 回あたりの limit の上限。
+//
+// 1000 は API の上限（実 API で確認: 1000 は受け付け、1000 を超えると黙って既定値に丸められる）。
+// -n 1000 以下なら 1 回で済む（ページングを入れる前と同じ呼び出し回数）。
+const messagePageLimit = 1000
+
+// collectMessages は conversations.history / replies を cursor でページングし、limit 件まで集める。
+//
+// 🚨 1 回だけ呼んで終わらせないこと。1 回の応答は limit 以下しか返さず、残りは
+// next_cursor の先にある。見ないと -n を満たさないまま rc=0 で終わり、
+// スレッドなら**新しい側の返信**が警告なしに欠ける（古い順に返るため）。
+//
+// 安全上限（maxPages）に達してもまだ続きがあるときは、取得できた分と TruncatedError を返す。
+// limit に達して止めるのは利用者が件数を指定した結果なので、打ち切りではない。
+// 2 ページ目以降の失敗は、取得できた分と PartialError を返す。
+//
+// ts で重複を除く（件数 -n は重複除去後で数える）。conversations.replies は各ページの先頭に
+// 親メッセージを再度含めるという報告がある（未実測）。含めなくても害は無い。
+func (c *Client) collectMessages(ctx context.Context, m Method, base url.Values, limit int, channelID, hint string) ([]Message, error) {
+	var out []Message
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; page < maxPages; page++ {
+		params := url.Values{}
+		for k, vs := range base {
+			params[k] = vs
+		}
+		want := limit - len(out)
+		if page > 0 {
+			// 🚨 2 ページ目以降は 1 件多く頼む。親の再掲（上記）で 1 件ぶん消費されると、
+			// 残り 1 件のときに「再掲された親だけ」のページが続いて maxPages まで空回りする。
+			// 多く取った分は下の out[:limit] で落ちる。
+			want++
+		}
+		params.Set("limit", strconv.Itoa(min(want, messagePageLimit)))
+		if cursor != "" {
+			params.Set("cursor", cursor)
+		}
+		var resp struct {
+			Messages []Message `json:"messages"`
+		}
+		raw, err := c.call(ctx, m, params, &resp)
+		if err != nil {
+			if len(out) > 0 {
+				return out, &PartialError{Method: m.String(), Count: len(out), Err: err}
+			}
+			return nil, err
+		}
+		for _, msg := range resp.Messages {
+			if msg.Ts != "" {
+				if seen[msg.Ts] {
+					continue
+				}
+				seen[msg.Ts] = true
+			}
+			msg.ChannelID = channelID
+			out = append(out, msg)
+		}
+		if len(out) >= limit {
+			return out[:limit], nil
+		}
+		var hasMore bool
+		cursor, hasMore = pageState(raw)
+		if cursor == "" {
+			if hasMore {
+				// 🚨 「続きがある」と言われたのに続きを取れない。完了扱いにしない。
+				return out, &TruncatedError{Method: m.String(), Pages: page + 1, Count: len(out), Hint: hint, Stalled: true}
+			}
+			return out, nil
+		}
+	}
+	return out, &TruncatedError{Method: m.String(), Pages: maxPages, Count: len(out), Hint: hint}
+}
+
+// History は conversations.history を（-n 件に達するまでページングして）取得する。新しい順。
 func (c *Client) History(ctx context.Context, channelID string, limit int, oldest, latest string) ([]Message, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	params := url.Values{
-		"channel": {channelID},
-		"limit":   {strconv.Itoa(limit)},
-	}
+	params := url.Values{"channel": {channelID}}
 	if oldest != "" {
 		params.Set("oldest", oldest)
 	}
 	if latest != "" {
 		params.Set("latest", latest)
 	}
-	var resp struct {
-		Messages []Message `json:"messages"`
-	}
-	if _, err := c.call(ctx, MethodConversationsHistory, params, &resp); err != nil {
-		return nil, err
-	}
-	for i := range resp.Messages {
-		resp.Messages[i].ChannelID = channelID
-	}
-	return resp.Messages, nil
+	return c.collectMessages(ctx, MethodConversationsHistory, params, limit, channelID, truncHintHistory)
 }
 
-// Replies は conversations.replies を呼ぶ（スレッド取得）。
+// Replies は conversations.replies を（-n 件に達するまでページングして）取得する（スレッド取得）。
+// 古い順（先頭は親メッセージ）。
 func (c *Client) Replies(ctx context.Context, channelID, threadTs string, limit int) ([]Message, error) {
 	if limit <= 0 {
 		limit = 200
@@ -268,18 +387,8 @@ func (c *Client) Replies(ctx context.Context, channelID, threadTs string, limit 
 	params := url.Values{
 		"channel": {channelID},
 		"ts":      {threadTs},
-		"limit":   {strconv.Itoa(limit)},
 	}
-	var resp struct {
-		Messages []Message `json:"messages"`
-	}
-	if _, err := c.call(ctx, MethodConversationsReplies, params, &resp); err != nil {
-		return nil, err
-	}
-	for i := range resp.Messages {
-		resp.Messages[i].ChannelID = channelID
-	}
-	return resp.Messages, nil
+	return c.collectMessages(ctx, MethodConversationsReplies, params, limit, channelID, truncHintReplies)
 }
 
 // Users は users.list を（必要なだけページングして）取得する。limit<=0 なら全件。
@@ -296,6 +405,9 @@ func (c *Client) Users(ctx context.Context, limit int) ([]User, error) {
 		}
 		raw, err := c.call(ctx, MethodUsersList, params, &resp)
 		if err != nil {
+			if len(out) > 0 {
+				return out, &PartialError{Method: MethodUsersList.String(), Count: len(out), Err: err}
+			}
 			return nil, err
 		}
 		out = append(out, resp.Members...)
@@ -307,5 +419,5 @@ func (c *Client) Users(ctx context.Context, limit int) ([]User, error) {
 			return out, nil
 		}
 	}
-	return out, &TruncatedError{Method: MethodUsersList.String(), Pages: maxPages, Count: len(out)}
+	return out, &TruncatedError{Method: MethodUsersList.String(), Pages: maxPages, Count: len(out), Hint: truncHintUsers}
 }

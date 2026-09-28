@@ -203,3 +203,44 @@ func checkNoTrailingFlags(fs *flag.FlagSet, args []string) error {
 func openSession(cfg config.Config) (*slack.Session, error) {
 	return slack.Resolve(context.Background(), cfg, nil, os.Stderr)
 }
+
+// splitListErr は一覧取得のエラーを振り分ける。
+//
+//   - 打ち切り（安全上限・has_more なのにカーソル無し）: 警告を stderr に出し、取得分を表示して rc=0
+//   - 途中失敗（PartialError）: 取得分を表示してから after として返す（rc≠0。完了ではない）
+//   - それ以外: err として返す（何も表示しない）
+//
+// 🚨 打ち切りを「エラーで終了（取得分を捨てる）」にも「無音で完全な一覧に見せる」にもしない。
+// 途中失敗を rc=0 にしない（スクリプトから見て、欠けた結果が完了に見える）。
+func splitListErr(err error) (after, fatal error) { return splitListErrTo(os.Stderr, err) }
+
+func splitListErrTo(w io.Writer, err error) (after, fatal error) {
+	switch {
+	case err == nil:
+		return nil, nil
+	case slack.IsPartial(err):
+		return err, nil
+	case slack.IsTruncated(err):
+		fmt.Fprintf(w, "警告: %v\n", err)
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+// finishList は一覧を出力し、出力後に返すべきエラー（after = 途中失敗）を返す。
+// render は TSV の組み立て（JSON のときは呼ばない）。
+func finishList[T any](asJSON bool, items []T, render func() string, after error) error {
+	if asJSON {
+		if err := printJSON(items); err != nil {
+			return err
+		}
+		return after
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(os.Stderr, "0 件")
+		return after
+	}
+	fmt.Print(render())
+	return after
+}

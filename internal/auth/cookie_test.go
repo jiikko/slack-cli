@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha256"
 	"strings"
 	"testing"
 )
 
 // encryptForTest は Chrome と同じ形（prefix + AES-128-CBC/IV=0x20*16/PKCS7）で暗号化する。
 // hashPrefix が true なら meta.version>=24 と同じくホストハッシュ 32 バイトを前置する。
-func encryptForTest(t *testing.T, key []byte, prefix, plaintext string, hashPrefix bool) []byte {
+//
+// hostKey が空でなければ、Chrome の cookie DB v24 以上と同じく先頭に SHA256(hostKey) を付ける。
+func encryptForTest(t *testing.T, key []byte, prefix, plaintext, hostKey string) []byte {
 	t.Helper()
 	data := []byte(plaintext)
-	if hashPrefix {
-		data = append(bytes.Repeat([]byte{0xAB}, 32), data...)
+	if hostKey != "" {
+		h := sha256.Sum256([]byte(hostKey))
+		data = append(h[:], data...)
 	}
 	pad := aes.BlockSize - len(data)%aes.BlockSize
 	data = append(data, bytes.Repeat([]byte{byte(pad)}, pad)...)
@@ -62,8 +66,8 @@ func TestDecryptValueHandlesV10AndV11(t *testing.T) {
 	key := testKey(t)
 	const secret = "xoxd-SENTINEL-VALUE"
 	for _, prefix := range []string{"v10", "v11"} {
-		enc := encryptForTest(t, key, prefix, secret, false)
-		got, err := decryptValue(enc, key, 0)
+		enc := encryptForTest(t, key, prefix, secret, "")
+		got, err := decryptValue(enc, key, 0, "")
 		if err != nil {
 			t.Fatalf("%s: %v", prefix, err)
 		}
@@ -81,8 +85,8 @@ func TestDecryptValueStripsHashPrefixByMetaVersion(t *testing.T) {
 	key := testKey(t)
 	const secret = "xoxd-SENTINEL-VALUE-LONG-ENOUGH-TO-SURVIVE-32-BYTES"
 
-	enc24 := encryptForTest(t, key, "v10", secret, true)
-	got, err := decryptValue(enc24, key, 24)
+	enc24 := encryptForTest(t, key, "v10", secret, ".slack.com")
+	got, err := decryptValue(enc24, key, 24, ".slack.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +95,8 @@ func TestDecryptValueStripsHashPrefixByMetaVersion(t *testing.T) {
 	}
 
 	// meta<24 のデータに対して 32 バイトを落としてはいけない。
-	enc0 := encryptForTest(t, key, "v10", secret, false)
-	got, err = decryptValue(enc0, key, 0)
+	enc0 := encryptForTest(t, key, "v10", secret, "")
+	got, err = decryptValue(enc0, key, 0, ".slack.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,8 +105,8 @@ func TestDecryptValueStripsHashPrefixByMetaVersion(t *testing.T) {
 	}
 
 	// ハッシュより短い復号結果は、黙って通さずエラーにする。
-	short := encryptForTest(t, key, "v10", "abc", false)
-	if _, err := decryptValue(short, key, 24); err == nil {
+	short := encryptForTest(t, key, "v10", "abc", "")
+	if _, err := decryptValue(short, key, 24, ".slack.com"); err == nil {
 		t.Error("32 バイト未満なのにエラーにならない")
 	}
 }
@@ -134,11 +138,11 @@ func TestPKCS7UnpadValidatesWholePadding(t *testing.T) {
 
 // 平文で保存された古い Cookie はそのまま返すこと。
 func TestDecryptValuePassesThroughPlaintext(t *testing.T) {
-	got, err := decryptValue([]byte("plain-value"), testKey(t), 0)
+	got, err := decryptValue([]byte("plain-value"), testKey(t), 0, "")
 	if err != nil || got != "plain-value" {
 		t.Errorf("平文が壊れた: %q %v", got, err)
 	}
-	if got, err := decryptValue(nil, testKey(t), 0); err != nil || got != "" {
+	if got, err := decryptValue(nil, testKey(t), 0, ""); err != nil || got != "" {
 		t.Errorf("空の値: %q %v", got, err)
 	}
 }

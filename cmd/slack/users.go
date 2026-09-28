@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 
 	"github.com/jiikko/slack-cli/internal/config"
 	"github.com/jiikko/slack-cli/internal/slack"
@@ -65,11 +63,9 @@ func cmdUsers(args []string) error {
 		return err
 	}
 	users, err := sess.Client.Users(context.Background(), 0)
+	after, err := splitListErr(err)
 	if err != nil {
-		if !slack.IsTruncated(err) {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "警告: %v\n", err)
+		return err
 	}
 
 	var filtered []slack.User
@@ -89,13 +85,5 @@ func cmdUsers(args []string) error {
 		}
 	}
 
-	if cfg.JSON {
-		return printJSON(filtered)
-	}
-	if len(filtered) == 0 {
-		fmt.Fprintln(os.Stderr, "0 件")
-		return nil
-	}
-	fmt.Print(userColumns.Render(filtered, cols, !noHeader))
-	return nil
+	return finishList(cfg.JSON, filtered, func() string { return userColumns.Render(filtered, cols, !noHeader) }, after)
 }

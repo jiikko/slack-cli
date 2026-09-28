@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 
 	"github.com/jiikko/slack-cli/internal/config"
 )
@@ -38,7 +36,7 @@ const threadHelp = `slack thread - スレッドの返信を取得する（conver
   thread_ts は親メッセージの ts（slack search -c ts,channel,text で得られる）。
 
 オプション:
-  -n <数>              取得件数（既定 200）
+  -n <数>              取得件数（既定 200）。スレッドの先頭（古い順）から数える
   -c, -columns <list>  表示カラム。既定: datetime,channel,user,text
   -no-header           ヘッダ行を出さない
   -json                JSON で出力
@@ -87,19 +85,12 @@ func cmdHistory(args []string) error {
 		return err
 	}
 	msgs, err := sess.Client.History(ctx, channelID, count, oldest, latest)
+	after, err := splitListErr(err)
 	if err != nil {
 		return err
 	}
 
-	if cfg.JSON {
-		return printJSON(msgs)
-	}
-	if len(msgs) == 0 {
-		fmt.Fprintln(os.Stderr, "0 件")
-		return nil
-	}
-	fmt.Print(messageColumns.Render(msgs, cols, !noHeader))
-	return nil
+	return finishList(cfg.JSON, msgs, func() string { return messageColumns.Render(msgs, cols, !noHeader) }, after)
 }
 
 func cmdThread(args []string) error {
@@ -139,17 +130,10 @@ func cmdThread(args []string) error {
 		return err
 	}
 	msgs, err := sess.Client.Replies(ctx, channelID, fs.Arg(1), count)
+	after, err := splitListErr(err)
 	if err != nil {
 		return err
 	}
 
-	if cfg.JSON {
-		return printJSON(msgs)
-	}
-	if len(msgs) == 0 {
-		fmt.Fprintln(os.Stderr, "0 件")
-		return nil
-	}
-	fmt.Print(messageColumns.Render(msgs, cols, !noHeader))
-	return nil
+	return finishList(cfg.JSON, msgs, func() string { return messageColumns.Render(msgs, cols, !noHeader) }, after)
 }
