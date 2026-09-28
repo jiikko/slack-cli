@@ -176,6 +176,23 @@ internal/config/        config.yml の読み書きと優先順位解決
 internal/output/        TSV / JSON 整形
 ```
 
+## リリース
+
+1. `main` の CI が緑であることを確かめてから tag を打つ（`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`）
+2. `curl -sL https://github.com/jiikko/slack-cli/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256` の値で、
+   [jiikko/homebrew-tap](https://github.com/jiikko/homebrew-tap) の `Formula/chrome-slack-cli.rb` の `url` と `sha256` を更新して push する
+3. **手元で入れ直して疎通を確かめる**（tag・tap・ソースからのビルドのどれかが壊れていても、ここまで来ないと分からない）
+
+```sh
+brew update
+brew uninstall jiikko/tap/chrome-slack-cli
+brew install jiikko/tap/chrome-slack-cli
+readlink -f "$(command -v slack)"   # 新しい版の Cellar を指しているか
+slack whoami                        # 認証（Keychain → d cookie / xoxc）とワークスペースの確認
+slack channels | wc -l               # API を実際に叩く読み取り
+ls ~/Library/Caches/slack-cli/extract   # 空であること（Cookie DB の一時コピーが残っていない）
+```
+
 ## ライセンス
 
 MIT
