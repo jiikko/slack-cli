@@ -177,14 +177,20 @@ func TestDiscoveryStopsOnTempRootFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(profile, "Local Storage", "leveldb"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	caches := filepath.Join(home, "Library", "Caches")
+	// 作業領域の親は os.UserCacheDir（darwin は ~/Library/Caches、Linux は ~/.cache）。
+	// パスを決め打ちすると Linux の CI では別の場所を壊すことになり、テストが空振りする。
+	t.Setenv("XDG_CACHE_HOME", "")
+	caches, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(caches, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(t.TempDir(), filepath.Join(caches, "slack-cli")); err != nil {
 		t.Skipf("シンボリックリンクを作れない: %v", err)
 	}
-	_, _, err := scanProfiles(false)
+	_, _, err = scanProfiles(false)
 	if !auth.IsEnvError(err) {
 		t.Fatalf("作業領域の異常が握り潰された: %v", err)
 	}

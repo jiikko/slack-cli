@@ -25,6 +25,7 @@ func isolateHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", "") // Linux の os.UserCacheDir を HOME 配下へ向ける
 	return home
 }
 
@@ -74,7 +75,11 @@ func TestLocalStoragePermissionDeniedIsReadDenied(t *testing.T) {
 		t.Errorf("コピー段: ReadDenied であるべき: %v", err)
 	}
 	// 失敗経路でも一時コピーが残らないこと。
-	root := filepath.Join(os.Getenv("HOME"), "Library", "Caches", "slack-cli", "extract")
+	caches, err := os.UserCacheDir() // darwin は ~/Library/Caches、Linux は ~/.cache
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(caches, "slack-cli", "extract")
 	if entries, err := os.ReadDir(root); err == nil && len(entries) != 0 {
 		t.Errorf("失敗経路で一時ディレクトリが残った: %d 件", len(entries))
 	}
