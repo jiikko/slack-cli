@@ -57,7 +57,7 @@ func DiscoverWorkspaces(profile string) ([]WorkspaceHint, error) {
 	})
 	if len(counts) == 0 {
 		// 🚨 読めなかったファイルがあるのに「候補なし」にしない。
-		if err := skipped.asError("ワークスペースの痕跡"); err != nil {
+		if err := skipped.AsError("ワークスペースの痕跡"); err != nil {
 			return nil, err
 		}
 	}

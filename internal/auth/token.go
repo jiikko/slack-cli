@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/jiikko/dotfiles/src/chromecookie"
 )
 
 // tokenRe は Slack の Web クライアント用トークン（xoxc-…）を拾う正規表現。
@@ -32,7 +34,7 @@ type TokenCandidate struct {
 
 // localStorageDir は Local Storage の leveldb ディレクトリを返す。
 func localStorageDir(profile string) (string, error) {
-	base, err := chromeProfileDir(profile)
+	base, err := chromecookie.ProfileDir(profile)
 	if err != nil {
 		return "", err
 	}
@@ -40,12 +42,11 @@ func localStorageDir(profile string) (string, error) {
 	if _, err := os.Stat(dir); err != nil {
 		// 🚨 アクセス拒否を「見つからない」に化けさせない。
 		if os.IsPermission(err) {
-			return "", diskAccessError("Local Storage ", dir, err)
+			return "", chromecookie.ReadFailure("Local Storage ", dir, err)
 		}
 		return "", fmt.Errorf(
-			"Local Storage が見つかりませんでした（プロファイル=%q）。探した場所:\n  %s\n"+
-				"  - プロファイル名が正しいか確認してください（-profile / SLACK_CLI_CHROME_PROFILE）。",
-			profile, dir)
+			"Local Storage が見つかりませんでした（プロファイル=%q）。探した場所:\n  %s\n%s",
+			profile, dir, profileHint)
 	}
 	return dir, nil
 }
@@ -53,12 +54,12 @@ func localStorageDir(profile string) (string, error) {
 // copyLevelDB は leveldb ディレクトリを一時領域へコピーする。
 //
 // 🚨 コピーの中身には xoxc トークンが含まれる。Cookie DB と同じ後始末の機構
-// （cleanup.go の 3 段構え）に必ず載せること。別経路で os.MkdirTemp すると、
+// （chromecookie の Workspace の 3 段構え。chrome.go の ws）に必ず載せること。別経路で os.MkdirTemp すると、
 // その残骸はシグナル経路にも起動時の掃除にも拾われない。
 //
-// 戻り値の skippedReads は読めずに飛ばしたファイルの記録（目的のものが見つからなかったときに添える）。
-func copyLevelDB(src string) (string, func(), skippedReads, error) {
-	tmpdir, cleanup, err := newTempDir()
+// 戻り値の SkippedReads は読めずに飛ばしたファイルの記録（目的のものが見つからなかったときに添える）。
+func copyLevelDB(src string) (string, func(), chromecookie.SkippedReads, error) {
+	tmpdir, cleanup, err := ws.NewTempDir()
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -66,11 +67,11 @@ func copyLevelDB(src string) (string, func(), skippedReads, error) {
 	if err != nil {
 		cleanup()
 		if os.IsPermission(err) {
-			return "", nil, nil, diskAccessError("Local Storage ", src, err)
+			return "", nil, nil, chromecookie.ReadFailure("Local Storage ", src, err)
 		}
 		return "", nil, nil, fmt.Errorf("Local Storage の読み取りに失敗: %w", err)
 	}
-	var skipped skippedReads
+	var skipped chromecookie.SkippedReads
 	for _, e := range entries {
 		if e.IsDir() {
 			continue // leveldb は平坦。サブディレクトリは読まない
@@ -78,7 +79,7 @@ func copyLevelDB(src string) (string, func(), skippedReads, error) {
 		data, err := os.ReadFile(filepath.Join(src, e.Name()))
 		if err != nil {
 			// 取れたものだけで走査する。ただし ENOENT（列挙後に消えた）以外は記録する。
-			skipped.add(err)
+			skipped.Add(err)
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(tmpdir, e.Name()), data, 0o600); err != nil {
@@ -91,10 +92,10 @@ func copyLevelDB(src string) (string, func(), skippedReads, error) {
 
 // walkCopiedFiles は copyLevelDB が作ったコピーの各ファイルを fn に渡す。
 // 読めなかったもの（ENOENT 以外）は skipped に記録して続行する。
-func walkCopiedFiles(dir string, skipped *skippedReads, fn func([]byte)) {
+func walkCopiedFiles(dir string, skipped *chromecookie.SkippedReads, fn func([]byte)) {
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			skipped.add(err)
+			skipped.Add(err)
 			return nil
 		}
 		if d.IsDir() {
@@ -102,7 +103,7 @@ func walkCopiedFiles(dir string, skipped *skippedReads, fn func([]byte)) {
 		}
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
-			skipped.add(rerr)
+			skipped.Add(rerr)
 			return nil
 		}
 		fn(data)
@@ -212,7 +213,7 @@ func ExtractTokens(profile, workspace string) ([]TokenCandidate, error) {
 	out := tc.result()
 	if len(out) == 0 {
 		// 🚨 読めなかったファイルがあるのに「トークンが無い」（ErrNoToken）にしない。
-		if err := skipped.asError("Slack のトークン（xoxc-…）"); err != nil {
+		if err := skipped.AsError("Slack のトークン（xoxc-…）"); err != nil {
 			return nil, err
 		}
 	}

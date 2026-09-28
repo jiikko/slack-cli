@@ -110,6 +110,9 @@ Slack の内部 API を叩くには 2 つの資格情報が要る。どちらも
 | セッションクッキー | `d=xoxd-…` | Chrome の暗号化 Cookie DB を Keychain 経由で復号 |
 | API トークン | `xoxc-…` | Chrome の Local Storage (leveldb) |
 
+- Cookie の復号・一時コピーの後始末・プロファイルの列挙は、esa-cli / newrelic-nrql-cli と共有する
+  [`github.com/jiikko/dotfiles/src/chromecookie`](https://github.com/jiikko/dotfiles/tree/master/src/chromecookie) が持つ。
+  **直すときはあちらを直し**、`go get github.com/jiikko/dotfiles/src/chromecookie@master` で取り込み直す（tag は打たない）。
 - Cookie の復号は PBKDF2-HMAC-SHA1（salt=`saltysalt` / 1003 回 / 16 バイト）→ AES-128-CBC（IV = 空白 16 バイト）。
   Chrome の `meta.version >= 24` では復号結果の先頭 32 バイトが `SHA256(host_key)` であることを照合してから落とす
   （一致しなければ復号失敗。鍵違いのゴミを cookie として使わない）。
@@ -156,8 +159,9 @@ python3 scripts/mutation_check.py          # 安全装置の変異検証（テ�
 python3 scripts/mutation_check.py --list   # 当てる変異の一覧
 ```
 
-`scripts/mutation_check.py` は、安全装置（ワークスペース限定 / allowlist / 後始末 / 無害化）を
-壊す変異を 1 つずつ当てて、対応するテストが赤くなることを確かめる。
+`scripts/mutation_check.py` は、安全装置（ワークスペース限定 / allowlist / 無害化 / Local Storage の読み取り）を
+壊す変異を 1 つずつ当てて、対応するテストが赤くなることを確かめる。後始末（3 経路の削除）と Cookie の復号の変異は
+chromecookie 側の `mutation_check.py` にある。
 **安全装置かそのテストを触ったら必ず走らせること**（green は「正しい」ではなく
 「その書き方では壊せなかった」でしかないため）。作業ツリーは触らず、コピーに対して変異を当てる。
 
@@ -165,7 +169,7 @@ python3 scripts/mutation_check.py --list   # 当てる変異の一覧
 
 ```
 cmd/slack/              サブコマンド分岐・フラグ・出力
-internal/auth/          Chrome cookie 復号 / xoxc 抽出 / プロファイル検出 / 一時コピーの後始末
+internal/auth/          d cookie の選択 / xoxc 抽出 / ワークスペース検出（Cookie 復号と後始末は chromecookie に委譲）
 internal/slack/         HTTP クライアント（allowlist・ワークスペース限定）/ API ラッパ / 接続解決
 internal/config/        config.yml の読み書きと優先順位解決
 internal/output/        TSV / JSON 整形
