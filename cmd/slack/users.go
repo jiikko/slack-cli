@@ -20,7 +20,6 @@ const usersHelp = `slack users - ユーザー一覧を表示する（users.list�
   -bots                ボットも含める（既定は人間のみ）
   -deleted             無効化済みユーザーも含める
   -json                JSON で出力
-  （共通オプション -workspace / -profile / -token は slack --help を参照）
 
 指定可能なカラム:
   id / name / real_name / email / is_bot / deleted
@@ -29,7 +28,7 @@ const usersHelp = `slack users - ユーザー一覧を表示する（users.list�
 例:
   slack users -name tanaka
   slack users -c id,name,email -no-header | grep example.com
-`
+` + commonOptionsHelp + commonTailHelp
 
 func cmdUsers(args []string) error {
 	var cfg config.Config

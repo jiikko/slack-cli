@@ -20,13 +20,12 @@ const historyHelp = `slack history - チャンネルのメッセージを取得�
   -c, -columns <list>  表示カラム。既定: datetime,channel,user,text
   -no-header           ヘッダ行を出さない
   -json                JSON で出力
-  （共通オプション -workspace / -profile / -token は slack --help を参照）
 
 例:
   slack history '#general'
   slack history -n 200 C0123456789
   slack history -oldest 1725000000.000000 '#dev'
-`
+` + commonOptionsHelp + commonTailHelp
 
 const threadHelp = `slack thread - スレッドの返信を取得する（conversations.replies）
 
@@ -44,7 +43,7 @@ const threadHelp = `slack thread - スレッドの返信を取得する（conver
 例:
   slack thread '#general' 1725000000.123456
   slack thread -json C0123456789 1725000000.123456 | jq -r '.[].text'
-`
+` + commonOptionsHelp + commonTailHelp
 
 func cmdHistory(args []string) error {
 	var cfg config.Config

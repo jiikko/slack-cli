@@ -26,7 +26,6 @@ const searchHelp = `slack search - メッセージを検索する（search.messa
   -in <channel>        チャンネル絞り込み（クエリに in:#channel を付ける）
   -from <user>         投稿者絞り込み（クエリに from:@user を付ける）
   -json                JSON で出力
-  （共通オプション -workspace / -profile / -token は slack --help を参照）
 
 指定可能なカラム:
   ts          Slack の ts（1725000000.123456）
@@ -42,7 +41,7 @@ const searchHelp = `slack search - メッセージを検索する（search.messa
   slack search -from alice 'after:2026-09-01 障害'
   slack search -no-header -c permalink 'キーワード' | head -20
   slack search -json 'キーワード' | jq -r '.[].permalink'
-`
+` + commonOptionsHelp + commonTailHelp
 
 func cmdSearch(args []string) error {
 	var cfg config.Config

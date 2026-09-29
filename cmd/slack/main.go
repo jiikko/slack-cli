@@ -23,35 +23,40 @@ import (
 	"github.com/jiikko/slack-cli/internal/slack"
 )
 
-const topUsage = `slack - Slack ワークスペースを読む CLI（読み取り専用 / Chrome cookie 認証）
+// topUsage は `slack` / `slack --help` の出力。概要とサブコマンドの一覧だけを持ち、詳細は各サブコマンドの --help に置く。
+const topUsage = `slack - Slack ワークスペースを読む CLI（読み取り専用 / Chrome のログインで認証）
 
-概要:
-  Chrome にログイン済みの Slack セッションを流用して、設定した 1 つのワークスペースを
-  検索・閲覧する。トークンの手動管理は不要。書き込み系の操作は一切持たない。
+使い方:  slack <サブコマンド> [オプション] [引数]
+  Chrome にログイン済みの Slack のセッションを使い、設定した 1 つのワークスペースを検索・閲覧する。
 
 サブコマンド:
-  search      メッセージ検索（search.messages）
-  channels    チャンネル一覧（conversations.list）
-  history     チャンネルのメッセージ取得（conversations.history）
-  thread      スレッドの返信取得（conversations.replies）
-  users       ユーザー一覧（users.list）
-  whoami      接続中のユーザー/ワークスペースを表示（auth.test）
-  config      設定ファイル(config.yml)の表示・編集
-  setup       対話式の初期セットアップ
+  search      メッセージを検索する
+  channels    チャンネルの一覧を出す
+  history     チャンネルのメッセージを出す
+  thread      スレッドの返信を出す
+  users       ユーザーの一覧を出す
+  whoami      接続中のユーザーとワークスペースを出す
+  config      設定ファイル（config.yml）を表示・編集する
+  setup       対話式で初期設定する（ワークスペース・Chrome のプロファイル）
   help        このヘルプ
 
-各サブコマンドの詳細:  slack <サブコマンド> --help   （例: slack search --help）
+各サブコマンドの詳細（オプション・終了コード・安全のための制約）:  slack <サブコマンド> --help
+はじめて使うとき:  slack setup
+`
 
+// commonOptionsHelp は Slack に問い合わせるサブコマンドの help に共通のオプションの説明（正本はここだけ）。
+const commonOptionsHelp = `
 共通オプション:
-  -workspace <name>  対象ワークスペースのサブドメイン。必須（` + config.EnvWorkspace + ` / config.yml workspace）
+  -workspace <name>  対象ワークスペースのサブドメイン。必須（` + config.EnvWorkspace + ` / config.yml の workspace でも可）
   -profile <name>    Chrome のプロファイル。既定 auto=自動検出（` + config.EnvProfile + `）
-  -token <xoxc-...>  トークンを明示指定（` + config.EnvToken + `）。指定してもワークスペース一致は検証する
+  -token <xoxc-...>  トークンを明示指定（` + config.EnvToken + `）。指定してもワークスペースの一致は検証する
   -json              JSON で出力
+  優先順位: コマンドラインフラグ > 環境変数 > config.yml > 既定（詳細は slack config --help）
+`
 
-設定の優先順位: コマンドラインフラグ > 環境変数 > config.yml > 既定
-  はじめての場合:  slack setup   （対話式にワークスペースとプロファイルを設定）
-
-終了コード: 0=成功 / 1=実行時エラー(認証切れ・ネットワーク等) / 2=使い方の誤り
+// commonTailHelp は Slack に問い合わせるサブコマンドの help の末尾に付ける、終了コードと安全のための制約（正本はここだけ）。
+const commonTailHelp = `
+終了コード: 0=成功 / 1=実行時エラー（認証切れ・ネットワーク等） / 2=使い方の誤り
 
 安全のための制約:
   - 設定した workspace 以外のホストへは API を投げない。

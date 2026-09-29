@@ -19,7 +19,6 @@ const channelsHelp = `slack channels - チャンネル一覧を表示する（co
   -no-header           ヘッダ行を出さない
   -n <数>              最大件数（既定 0=全件）
   -json                JSON で出力
-  （共通オプション -workspace / -profile / -token は slack --help を参照）
 
 指定可能なカラム:
   id / name / is_private / is_archived / num_members / topic / purpose
@@ -29,7 +28,7 @@ const channelsHelp = `slack channels - チャンネル一覧を表示する（co
   slack channels -name dev
   slack channels -types public_channel -c id,name
   slack channels -json | jq -r '.[] | select(.is_private) | .name'
-`
+` + commonOptionsHelp + commonTailHelp
 
 func cmdChannels(args []string) error {
 	var cfg config.Config

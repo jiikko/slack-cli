@@ -12,8 +12,7 @@ const whoamiHelp = `slack whoami - 接続中のユーザーとワークスペー
 
 使い方:
   slack whoami [-json]
-  （共通オプション -workspace / -profile / -token は slack --help を参照）
-`
+` + commonOptionsHelp + commonTailHelp
 
 func cmdWhoami(args []string) error {
 	var cfg config.Config

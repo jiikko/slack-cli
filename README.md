@@ -86,7 +86,8 @@ default_count: 20     # 検索・取得の既定件数
 | `slack whoami` | 接続中のユーザー/ワークスペース | `auth.test` |
 | `slack config` / `slack setup` | 設定 | （通信なし / 確認の 1 回のみ） |
 
-詳細は `slack <コマンド> --help`。共通フラグは `-workspace` / `-profile` / `-token` / `-json`。
+`slack --help` は概要とサブコマンドの一覧だけ。オプション・共通フラグ（`-workspace` / `-profile` / `-token` / `-json`）・終了コード・
+安全のための制約の詳細は `slack <コマンド> --help` に出る。
 
 出力は既定で TSV。`-c` / `-columns` で列を選び、`-no-header` でヘッダを抑制できるので、
 `awk -F'\t'` や `cut` にそのまま流せる。`-json` は機械可読な JSON。
