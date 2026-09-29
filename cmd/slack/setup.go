@@ -21,7 +21,7 @@ Chrome のログイン状況から「対象ワークスペース」と「使用�
   slack setup -workspace X   既定値を渡して開始（プロンプトで上書き可）
 
 非対話（パイプ/入力なし）で実行した場合は各項目とも既定値を採用する。
-`
+` + commonOptionsHelp + commonTailHelp
 
 // promptDefault は 1 行入力を求める。空入力/EOF なら def を返す。
 func promptDefault(r *bufio.Reader, label, def string) string {
