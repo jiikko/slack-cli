@@ -83,7 +83,7 @@ formula を tap へ置いた時点で完了と報告しかけたが、実際に 
 
 - [ ] 上記 1〜6 の切り出し（ユーザーの判断待ち）
 - [ ] 4 周目の敵対的レビューを回すか（ユーザーの判断待ち）
-- [ ] formula がリポジトリと tap の 2 箇所にある（`.goreleaser.yaml` の `brews:` で
-      自動更新にするか、ずれを検出する検査を置く。CLAUDE.md「同じ規約を複数の場所へ
-      配るときは正本を読み込ませる」に該当）
+- [x] formula がリポジトリと tap の 2 箇所にある → 解消（2026-09-29）。repo 側の写しは
+      「formula を tap 一本に寄せ」の commit で消えており、残っていた `.goreleaser.yaml`（`brews:`）も
+      GoReleaser を入れない判断（ユーザー）で削除した。formula の正本は jiikko/homebrew-tap だけ
 - [ ] `issues/001` の人手確認（5 項目）
