@@ -141,6 +141,47 @@ func TestExplicitLimitIsNotTruncation(t *testing.T) {
 	}
 }
 
+// conversations.history は一部のメッセージで channel を文字列 (チャンネル ID) で返す。
+// オブジェクト前提で受けると、その 1 件でページ全体の解析が失敗して history が落ちる (2026-10-06 実測)。
+func TestHistoryAcceptsStringChannel(t *testing.T) {
+	rt := &recordingTransport{handle: func(method string, form url.Values) (int, string) {
+		return 200, `{"ok":true,"messages":[` +
+			`{"ts":"1725000000.000300","text":"string","channel":"C0123456789"},` +
+			`{"ts":"1725000000.000200","text":"object","channel":{"id":"C0123456789","name":"general"}},` +
+			`{"ts":"1725000000.000100","text":"null","channel":null}]}`
+	}}
+	c := newTestClient(t, rt)
+	msgs, err := c.History(context.Background(), "C0123456789", 10, "", "")
+	if err != nil {
+		t.Fatalf("channel が文字列のメッセージで解析に失敗した: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("件数: %d", len(msgs))
+	}
+	want := []MessageChannel{{ID: "C0123456789"}, {ID: "C0123456789", Name: "general"}, {}}
+	for i, m := range msgs {
+		if m.Channel != want[i] {
+			t.Errorf("%d 件目の channel: %+v (want %+v)", i, m.Channel, want[i])
+		}
+	}
+	// -json の出力は、入力が文字列でもオブジェクトの形にする (jq で .channel.id を読む利用を壊さない)。
+	b, err := json.Marshal(msgs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"channel":{"id":"C0123456789","name":""}`) {
+		t.Errorf("-json の channel がオブジェクトの形でない: %s", b)
+	}
+}
+
+// channel が文字列・オブジェクト・null 以外の形なら、黙って空にせず誤りにする。
+func TestMessageChannelRejectsOtherShapes(t *testing.T) {
+	var c MessageChannel
+	if err := json.Unmarshal([]byte(`123`), &c); err == nil {
+		t.Errorf("数値の channel を受け入れた: %+v", c)
+	}
+}
+
 // history / replies は引数のチャンネルを各メッセージへ埋めること（-json でも落とさない）。
 func TestHistoryFillsChannelID(t *testing.T) {
 	rt := &recordingTransport{handle: func(method string, form url.Values) (int, string) {

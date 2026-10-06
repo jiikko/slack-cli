@@ -1,6 +1,9 @@
 package slack
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // envelope は Slack API の共通レスポンス枠。
 type envelope struct {
@@ -27,26 +30,54 @@ type AuthTest struct {
 
 // Message は search.messages / conversations.history / conversations.replies の 1 件。
 //
-// channel は search.messages にはあり、history/replies には無い（呼び出し側で補う）。
+// channel は search.messages にはオブジェクトであり、history/replies には基本的に無い（呼び出し側で補う）。
+// history でも一部のメッセージは文字列で持つ（MessageChannel を参照）。
 type Message struct {
-	Type     string `json:"type"`
-	User     string `json:"user"`
-	Username string `json:"username"`
-	BotID    string `json:"bot_id"`
-	Ts       string `json:"ts"`
-	ThreadTs string `json:"thread_ts"`
-	Text     string `json:"text"`
-	Perma    string `json:"permalink"`
-	Channel  struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"channel"`
+	Type     string         `json:"type"`
+	User     string         `json:"user"`
+	Username string         `json:"username"`
+	BotID    string         `json:"bot_id"`
+	Ts       string         `json:"ts"`
+	ThreadTs string         `json:"thread_ts"`
+	Text     string         `json:"text"`
+	Perma    string         `json:"permalink"`
+	Channel  MessageChannel `json:"channel"`
 	// ChannelID は history/replies のように channel が無いレスポンスで、
 	// 呼び出し側が引数のチャンネルを埋めるための欄。
 	//
 	// 🚨 json:"-" にしないこと。TSV の channel 列はここへフォールバックするのに、
 	// -json 出力だけチャンネルが落ちる（jq に流す用途で効く）。
 	ChannelID string `json:"channel_id,omitempty"`
+}
+
+// MessageChannel は Message の channel 欄。
+//
+// search.messages は {"id": ..., "name": ...} のオブジェクトで返すが、conversations.history の一部の
+// メッセージは "C..." の文字列 (チャンネル ID) で返す (2026-10-06 実測。オブジェクト前提で受けると、
+// その 1 件のせいでページ全体の解析が失敗して history が rc=1 で終わる)。どちらの形も受ける。
+// 出力 (-json) は常にオブジェクトの形にする。
+type MessageChannel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// UnmarshalJSON は、オブジェクト・文字列・null のどれでも受ける。それ以外の形は誤りとして返す。
+func (c *MessageChannel) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	var id string
+	if err := json.Unmarshal(b, &id); err == nil {
+		*c = MessageChannel{ID: id}
+		return nil
+	}
+	type plain MessageChannel // UnmarshalJSON を持たない型にして、自分を再帰で呼ばないようにする
+	var v plain
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("channel がオブジェクト・文字列・null のどれでもない (%s): %w", b, err)
+	}
+	*c = MessageChannel(v)
+	return nil
 }
 
 // SearchResult は search.messages の結果。
