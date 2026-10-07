@@ -182,4 +182,9 @@ codex は利用上限のため使えず、観点を分けた読み取り専用�
 
 ## 進捗
 
-- 2026-10-07 起票。反証レビューの指摘を反映。未着手
+- 2026-10-07 起票。反証レビューの指摘を反映
+- 2026-10-07 着手
+  - [x] 対応方針 1: `fix(config): config init / setup も壊れた config.yml を上書きしない`。`refuseWriteIfBroken` に寄せ、
+    config set / config init / setup の入口で呼ぶ（検出・接続の前）。回帰テスト `TestBrokenConfigIsNotOverwrittenByAnyWriter`。
+    変異検証（`mutate-verify`）: init / setup の呼び出しをそれぞれ外すと、該当のサブテストだけが red
+  - [ ] 対応方針 2〜4

@@ -48,6 +48,10 @@ func cmdSetup(args []string) error {
 	if done, err := parseArgs(fs, setupHelp, args); err != nil || done {
 		return err
 	}
+	// 検出・接続の前に断る（最後に保存で失敗すると、対話と接続確認が無駄になる）。
+	if err := refuseWriteIfBroken(); err != nil {
+		return err
+	}
 
 	in := bufio.NewReader(os.Stdin)
 	fmt.Println("=== slack-cli セットアップ ===")

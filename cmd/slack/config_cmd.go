@@ -56,13 +56,8 @@ func cmdConfig(args []string) error {
 		fmt.Println(v)
 		return nil
 	case "set":
-		// 🚨 読めなかったファイルを「読めたこと」にして上書きしない。
-		// 解析に失敗したまま書き直すと、他の設定が黙って消える。
-		if err := config.Problem(); err != nil {
-			path, _ := config.Path()
-			return &config.UsageError{Msg: fmt.Sprintf(
-				"エラー: 設定ファイルを読めないため書き込みを中止しました。\n  %v\n"+
-					"  ファイルを直すか削除してから、もう一度実行してください: %s", err, path)}
+		if err := refuseWriteIfBroken(); err != nil {
+			return err
 		}
 		if len(args) < 3 {
 			return &config.UsageError{Msg: "エラー: キーと値を指定してください。\n使い方: slack config set <workspace|profile|default_count> <値>\n例:     slack config set workspace acme"}
@@ -117,6 +112,21 @@ func configShow() error {
 	return nil
 }
 
+// refuseWriteIfBroken は config.yml を書き直す全経路（config set / config init / setup）の入口で呼ぶ。
+//
+// 🚨 読めなかったファイルを「読めたこと」にして上書きしない。
+// 解析に失敗したまま書き直すと、ゼロ値に書いたキーだけが残り、他の設定が黙って消える。
+func refuseWriteIfBroken() error {
+	err := config.Problem()
+	if err == nil {
+		return nil
+	}
+	path, _ := config.Path()
+	return &config.UsageError{Msg: fmt.Sprintf(
+		"エラー: 設定ファイルを読めないため書き込みを中止しました。\n  %v\n"+
+			"  ファイルを直すか削除してから、もう一度実行してください: %s", err, path)}
+}
+
 // mustGet は config.Get の値だけを取り出す（キーは定数なのでエラーは起きない）。
 func mustGet(fc config.File, key string) string {
 	v, err := config.Get(fc, key)
@@ -151,6 +161,10 @@ func configInit(args []string) error {
 	fs := newFlagSet("config init")
 	registerCommon(fs, &cfg)
 	if done, err := parseArgs(fs, configHelp, args); err != nil || done {
+		return err
+	}
+	// 検出・接続の前に断る（接続してから保存で失敗すると、確認 1 回分が無駄になる）。
+	if err := refuseWriteIfBroken(); err != nil {
 		return err
 	}
 

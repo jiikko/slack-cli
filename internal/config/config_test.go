@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -18,11 +17,7 @@ func isolate(t *testing.T) string {
 	return filepath.Join(dir, "slack-cli")
 }
 
-func resetCache() {
-	loadOnce = sync.Once{}
-	loadCached = File{}
-	loadErr = nil
-}
+func resetCache() { ResetCache() }
 
 // 優先順位が「環境変数 > config.yml > 組み込み既定」であること。
 // （フラグはこの既定値を上書きする形なので、flag > env > file > default になる）

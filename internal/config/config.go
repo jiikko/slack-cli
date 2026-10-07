@@ -87,6 +87,14 @@ var (
 	loadErr    error // 解析に失敗したときの理由（config set はこれを見て書き込みを拒む）
 )
 
+// ResetCache は読み込みのキャッシュを捨てる。テストで設定ディレクトリを差し替えた後に呼ぶ
+// （Load はプロセス内で 1 回しか読まないため、差し替える前の内容が残る）。
+func ResetCache() {
+	loadOnce = sync.Once{}
+	loadCached = File{}
+	loadErr = nil
+}
+
 // Problem は config.yml の解析に失敗していればその理由を返す。
 func Problem() error {
 	Load()
