@@ -114,7 +114,7 @@ func cmdSetup(args []string) error {
 	}
 
 	// 3. 保存
-	fc := config.Load()
+	fc := config.GlobalFile()
 	if err := config.Set(&fc, "workspace", sess.Client.Workspace()); err != nil {
 		return err
 	}

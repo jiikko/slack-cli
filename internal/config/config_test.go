@@ -73,7 +73,7 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 		t.Fatalf("Keys が増減している（テストを更新すること）: %v", Keys)
 	}
 
-	fc := Load()
+	fc := GlobalFile()
 	for _, k := range Keys {
 		if err := Set(&fc, k, values[k]); err != nil {
 			t.Fatalf("%s: %v", k, err)
@@ -84,7 +84,7 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 	}
 
 	resetCache()
-	reloaded := Load()
+	reloaded := GlobalFile()
 	for _, k := range Keys {
 		got, err := Get(reloaded, k)
 		if err != nil {
@@ -117,7 +117,7 @@ func TestTeamAliasIsAcceptedAndNormalized(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fc := Load()
+	fc := GlobalFile()
 	if got, _ := Get(fc, "workspace"); got != "alpha" {
 		t.Errorf("team を workspace として読めていない: %q", got)
 	}
@@ -221,7 +221,7 @@ func TestProfileCacheStoresOnlyProfileName(t *testing.T) {
 // 不明なキーは弾くこと。
 func TestUnknownKeyRejected(t *testing.T) {
 	isolate(t)
-	fc := Load()
+	fc := GlobalFile()
 	if err := Set(&fc, "token", "xoxc-secret"); err == nil {
 		t.Error("token は config.yml に保存できてはいけない（資格情報を保存しない方針）")
 	}

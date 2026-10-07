@@ -49,7 +49,7 @@ func cmdConfig(args []string) error {
 		if len(args) < 2 {
 			return &config.UsageError{Msg: "エラー: キー名を指定してください。\n使い方: slack config get <workspace|profile|default_count>"}
 		}
-		v, err := config.Get(config.Load(), args[1])
+		v, err := config.Get(config.Effective(), args[1])
 		if err != nil {
 			return &config.UsageError{Msg: "エラー: " + err.Error()}
 		}
@@ -75,7 +75,7 @@ func cmdConfig(args []string) error {
 
 func configShow() error {
 	path, _ := config.Path()
-	fc := config.Load()
+	fc := config.Effective()
 	exists := false
 	if _, err := os.Stat(path); err == nil {
 		exists = true
@@ -137,7 +137,7 @@ func mustGet(fc config.File, key string) string {
 }
 
 func configSet(key, value string) error {
-	fc := config.Load()
+	fc := config.GlobalFile()
 	if err := config.Set(&fc, key, value); err != nil {
 		return &config.UsageError{Msg: "エラー: " + err.Error()}
 	}
@@ -168,7 +168,7 @@ func configInit(args []string) error {
 		return err
 	}
 
-	fc := config.Load()
+	fc := config.GlobalFile()
 
 	// 1. workspace が未設定なら、ローカルの痕跡から候補を出す。
 	if strings.TrimSpace(cfg.Workspace) == "" {

@@ -81,46 +81,68 @@ func Path() (string, error) {
 	return filepath.Join(dir, "config.yml"), nil
 }
 
+// layer は 1 つの設定ファイルの読み込み結果。
+type layer struct {
+	file File
+	err  error // 解析に失敗したときの理由（書き込みはこれを見て拒む）
+}
+
 var (
-	loadOnce   sync.Once
-	loadCached File
-	loadErr    error // 解析に失敗したときの理由（config set はこれを見て書き込みを拒む）
+	loadOnce sync.Once
+	global   layer // 共通の config.yml
 )
 
 // ResetCache は読み込みのキャッシュを捨てる。テストで設定ディレクトリを差し替えた後に呼ぶ
-// （Load はプロセス内で 1 回しか読まないため、差し替える前の内容が残る）。
+// （読み込みはプロセス内で 1 回しか行わないため、差し替える前の内容が残る）。
 func ResetCache() {
 	loadOnce = sync.Once{}
-	loadCached = File{}
-	loadErr = nil
+	global = layer{}
 }
 
-// Problem は config.yml の解析に失敗していればその理由を返す。
-func Problem() error {
-	Load()
-	return loadErr
-}
-
-// Load は config.yml を読む（無ければゼロ値）。プロセス内で 1 回だけ読む。
-func Load() File {
+func load() {
 	loadOnce.Do(func() {
-		path, err := Path()
-		if err != nil {
-			return
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return // 無い場合はゼロ値
-		}
-		var fc File
-		if err := yaml.Unmarshal(data, &fc); err != nil {
-			loadErr = fmt.Errorf("%s の解析に失敗しました: %w", path, err)
-			fmt.Fprintf(os.Stderr, "警告: %v\n", loadErr)
-			return
-		}
-		loadCached = fc
+		global = readGlobal()
 	})
-	return loadCached
+}
+
+// readGlobal は共通の config.yml を読む（無ければゼロ値）。
+func readGlobal() layer {
+	path, err := Path()
+	if err != nil {
+		return layer{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return layer{} // 無い場合はゼロ値
+	}
+	var fc File
+	if err := yaml.Unmarshal(data, &fc); err != nil {
+		l := layer{err: fmt.Errorf("%s の解析に失敗しました: %w", path, err)}
+		fmt.Fprintf(os.Stderr, "警告: %v\n", l.err)
+		return l
+	}
+	return layer{file: fc}
+}
+
+// Problem は共通の config.yml の解析に失敗していればその理由を返す。
+func Problem() error {
+	load()
+	return global.err
+}
+
+// GlobalFile は共通の config.yml 単体の内容を返す。Save に渡す値はここから作る。
+//
+// 🚨 Effective の結果を Save に渡さない。実効値には config.yml 以外から来た値が混ざりうるので、
+// それを config.yml に書き写すと、出所が違う値が以後 config.yml の値として残り続ける。
+func GlobalFile() File {
+	load()
+	return global.file
+}
+
+// Effective は設定ファイルから決まる実効値を返す（環境変数・フラグは含まない）。表示と既定値の解決に使う。
+func Effective() File {
+	load()
+	return global.file
 }
 
 // Save は config.yml を書き出す（ディレクトリごと作成）。
@@ -188,7 +210,7 @@ func ResolveDefaultInt(envKey string, fileVal, builtin int) (value int, source s
 
 // Defaults は現在の config.yml / 環境変数から、各項目の既定値を返す。
 func Defaults() (workspace, profile string, count int) {
-	fc := Load()
+	fc := Effective()
 	workspace = ResolveDefault(EnvWorkspace, fc.workspaceValue(), "")
 	profile = ResolveDefault(EnvProfile, fc.Profile, DefaultProfile)
 	count, _ = ResolveDefaultInt("", fc.DefaultCount, DefaultCount)
