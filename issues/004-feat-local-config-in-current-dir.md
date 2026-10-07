@@ -115,6 +115,18 @@ auth.test の照合も通り、`other` が読まれる。`profile` を書けば�
 
 - help の文言は `help_layout_test.go` に「`commonOptionsHelp` と `configHelp` が `.slack-cli.yml` に触れている」検査を足して固定する
 
+### README の修正箇所（2026-10-07 に grep で列挙）
+
+実装と同じ commit で直す（実装より先に書くと、まだ無い機能を説明することになる）。
+
+| 節 | 直す内容 |
+|---|---|
+| 「設定ファイル」 | **カレントディレクトリに `.slack-cli.yml` があれば読み込まれ、書いてあるキーが共通の config.yml より優先される**ことを、共通の config.yml の場所の直後に書く。補足として次も書く: カレントディレクトリだけを見る（親はさかのぼらない）/ キーごとに上書き（書いていないキーは共通側）/ 書式は config.yml と同じ / `slack config set -local <key> <値>` で書ける / 使ったときは stderr に 1 行出る / シンボリックリンク・自分以外の所有・グループか他人が書き込めるファイルとディレクトリは無視される。ローカル設定の例（`workspace` だけを書いた YAML）を 1 つ載せる |
+| 同節の優先順位 | **コマンドラインフラグ > 環境変数 > `.slack-cli.yml` > config.yml > 既定値** |
+| 同節の資格情報の注記 | 「config.yml」を「config.yml / `.slack-cli.yml`」にする |
+| 「安全のための制約」1. ワークスペース限定 | 「設定した workspace」にはローカル設定も含まれること、clone した repo の `.slack-cli.yml` で読む対象のワークスペース・プロファイルが変わりうること、通知は stderr の 1 行だけで信頼確認は無いことを書く |
+| 構成（`internal/config/` の行） | 「config.yml / `.slack-cli.yml` の読み書きと優先順位解決」にする |
+
 ### 変えないもの
 
 - 自動検出したプロファイルのキャッシュ（`profileCachePath`。`internal/slack/resolve.go` が読み書きする）は workspace ごとのキーなので変更しない
@@ -144,7 +156,8 @@ auth.test の照合も通り、`other` が読まれる。`profile` を書けば�
 - [ ] グループか他人が書き込めるカレントディレクトリではローカル設定を読まない
 - [ ] ローカル設定を使ったことが stderr に出て、stdout（`-json` を含む）には出ない
 - [ ] 「help・メッセージの修正箇所」の表の全行を直し、`help_layout_test.go` の検査で固定する
-- [ ] README の「設定ファイル」節、package doc と `main.go` の冒頭コメントを新しい方針に合わせる
+- [ ] 「README の修正箇所」の表の全行を直す（ローカル設定があれば読み込まれることが「設定ファイル」節に書いてある）
+- [ ] package doc と `main.go` の冒頭コメントを新しい方針に合わせる
 
 ## 関連ファイル
 
