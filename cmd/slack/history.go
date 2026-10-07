@@ -11,7 +11,8 @@ const historyHelp = `slack history - チャンネルのメッセージを取得�
 使い方:
   slack history [オプション] <#チャンネル名|チャンネルID>
 
-  #name を渡した場合は conversations.list で ID を解決してから取得する。
+  #name を渡した場合は conversations.list で ID を解決してから取得する（チャンネル一覧のキャッシュに名前があれば、
+  その ID を conversations.info で確かめてから使う）。
 
 オプション:
   -n <数>              取得件数（既定 50）
@@ -19,6 +20,7 @@ const historyHelp = `slack history - チャンネルのメッセージを取得�
   -latest <ts>         この ts より古いメッセージ
   -c, -columns <list>  表示カラム。既定: datetime,channel,user,text
   -no-header           ヘッダ行を出さない
+  -refresh             #name の解決にチャンネル一覧のキャッシュを使わない
   -json                JSON で出力
 
 例:
@@ -38,6 +40,7 @@ const threadHelp = `slack thread - スレッドの返信を取得する（conver
   -n <数>              取得件数（既定 200）。スレッドの先頭（古い順）から数える
   -c, -columns <list>  表示カラム。既定: datetime,channel,user,text
   -no-header           ヘッダ行を出さない
+  -refresh             #name の解決にチャンネル一覧のキャッシュを使わない
   -json                JSON で出力
 
 例:
@@ -49,7 +52,7 @@ func cmdHistory(args []string) error {
 	var cfg config.Config
 	var count int
 	var oldest, latest, columnsSpec string
-	var noHeader bool
+	var noHeader, refresh bool
 
 	fs := newFlagSet("history")
 	registerCommon(fs, &cfg)
@@ -59,6 +62,7 @@ func cmdHistory(args []string) error {
 	fs.StringVar(&columnsSpec, "columns", messageColumns.Defaults(), "表示カラム。指定可能: "+messageColumns.Available())
 	fs.StringVar(&columnsSpec, "c", messageColumns.Defaults(), "-columns の別名")
 	fs.BoolVar(&noHeader, "no-header", false, "ヘッダ行を出力しない")
+	fs.BoolVar(&refresh, "refresh", false, "#name の解決にチャンネル一覧のキャッシュを使わない")
 	if done, err := parseArgs(fs, historyHelp, args); err != nil || done {
 		return err
 	}
@@ -78,6 +82,7 @@ func cmdHistory(args []string) error {
 	if err != nil {
 		return err
 	}
+	useChannelCache(sess, refresh)
 	ctx := context.Background()
 	channelID, err := sess.Client.ResolveChannel(ctx, fs.Arg(0))
 	if err != nil {
@@ -96,7 +101,7 @@ func cmdThread(args []string) error {
 	var cfg config.Config
 	var count int
 	var columnsSpec string
-	var noHeader bool
+	var noHeader, refresh bool
 
 	fs := newFlagSet("thread")
 	registerCommon(fs, &cfg)
@@ -104,6 +109,7 @@ func cmdThread(args []string) error {
 	fs.StringVar(&columnsSpec, "columns", messageColumns.Defaults(), "表示カラム。指定可能: "+messageColumns.Available())
 	fs.StringVar(&columnsSpec, "c", messageColumns.Defaults(), "-columns の別名")
 	fs.BoolVar(&noHeader, "no-header", false, "ヘッダ行を出力しない")
+	fs.BoolVar(&refresh, "refresh", false, "#name の解決にチャンネル一覧のキャッシュを使わない")
 	if done, err := parseArgs(fs, threadHelp, args); err != nil || done {
 		return err
 	}
@@ -123,6 +129,7 @@ func cmdThread(args []string) error {
 	if err != nil {
 		return err
 	}
+	useChannelCache(sess, refresh)
 	ctx := context.Background()
 	channelID, err := sess.Client.ResolveChannel(ctx, fs.Arg(0))
 	if err != nil {

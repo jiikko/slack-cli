@@ -319,6 +319,14 @@ func TestLocalConfigGuardsAreWired(t *testing.T) {
 			rules = append(rules, rule{file: file, fn: fn, guard: "parseArgs", mustGuard: true, before: "openSession"})
 		}
 	}
+	// チャンネル一覧のキャッシュは、接続の後・一覧の取得 / 名前の解決の前に付ける（issue 007）。
+	for _, w := range []struct{ file, fn, use string }{
+		{"channels.go", "cmdChannels", "Channels"}, {"history.go", "cmdHistory", "ResolveChannel"}, {"history.go", "cmdThread", "ResolveChannel"},
+	} {
+		rules = append(rules,
+			rule{file: w.file, fn: w.fn, guard: "useChannelCache", after: "openSession"},
+			rule{file: w.file, fn: w.fn, guard: "useChannelCache", before: w.use})
+	}
 	for _, r := range rules {
 		calls := callsIn(t, r.file, r.fn)
 		first := func(name string, guardedOnly bool) token.Pos {

@@ -238,6 +238,16 @@ func openSession(cfg config.Config) (*slack.Session, error) {
 	return slack.Resolve(context.Background(), cfg, nil, os.Stderr)
 }
 
+// useChannelCache はチャンネル一覧のキャッシュ（1 時間）を接続に付ける。置き場所を作れなければ付けない（今どおり毎回 API から取る）。
+// refresh なら読まずに取り直す（取れたら書き直す）。
+func useChannelCache(sess *slack.Session, refresh bool) {
+	dir, err := config.CacheDir()
+	if err != nil {
+		return
+	}
+	sess.Client.UseChannelCache(slack.NewChannelCache(dir, sess.Client.Workspace(), sess.Auth.UserID, refresh, os.Stderr))
+}
+
 // splitListErr は一覧取得のエラーを振り分ける。
 //
 //   - 打ち切り（安全上限・has_more なのにカーソル無し）: 警告を stderr に出し、取得分を表示して rc=0

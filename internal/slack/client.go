@@ -33,6 +33,8 @@ type Client struct {
 	token     string       // xoxc-…
 	cookie    string       // d cookie の値（xoxd-…）
 	retry     *RetryBudget // nil なら 429 で待たない（retry.go の WithRetry）
+	// channelCache はチャンネル一覧のキャッシュ（channelcache.go）。nil なら使わない
+	channelCache *ChannelCache
 }
 
 // Option は Client の組み立てオプション（テストでの差し替え用）。

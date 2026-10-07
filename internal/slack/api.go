@@ -162,8 +162,10 @@ func IsPartial(err error) bool {
 // `slack history '#name'` のたびに最大 maxPages 回のリクエストを投げ、
 // すぐレート制限（429）に当たる（実測で踏んだ）。
 func (c *Client) forEachChannelPage(ctx context.Context, types string, fn func([]Channel) bool) (truncated bool, err error) {
-	if types == "" {
-		types = "public_channel,private_channel"
+	if t := canonicalTypes(types); t != "" {
+		types = t // キャッシュのキーと同じ正規化を通す（channelcache.go の canonicalTypes）
+	} else if types == "" {
+		types = defaultChannelTypes
 	}
 	cursor := ""
 	for page := 0; page < maxPages; page++ {
@@ -193,9 +195,19 @@ func (c *Client) forEachChannelPage(ctx context.Context, types string, fn func([
 	return true, nil
 }
 
+// defaultChannelTypes は conversations.list の types の既定値。
+const defaultChannelTypes = "public_channel,private_channel"
+
 // Channels は conversations.list を（必要なだけページングして）取得する。
-// limit<=0 なら全件。
+// limit<=0 なら全件。チャンネル一覧のキャッシュ（UseChannelCache）が新しければ、API を呼ばずにそれを返す。
 func (c *Client) Channels(ctx context.Context, types string, limit int) ([]Channel, error) {
+	if chs, age, ok := c.channelCache.load(types); ok {
+		c.channelCache.noteUsed(age)
+		if limit > 0 && len(chs) > limit {
+			chs = chs[:limit]
+		}
+		return chs, nil
+	}
 	var out []Channel
 	truncated, err := c.forEachChannelPage(ctx, types, func(page []Channel) bool {
 		out = append(out, page...)
@@ -213,6 +225,10 @@ func (c *Client) Channels(ctx context.Context, types string, limit int) ([]Chann
 	if truncated {
 		// データは返すが、不完全だと伝える。
 		return out, &TruncatedError{Method: MethodConversationsList.String(), Pages: maxPages, Count: len(out), Hint: truncHintChannels}
+	}
+	// 書くのは全件を最後まで取れたときだけ（途中で失敗・打ち切り・-n で止めた取得を「全件」として使い回さない）。
+	if limit <= 0 {
+		c.channelCache.save(types, out)
 	}
 	return out, nil
 }
@@ -241,6 +257,9 @@ func (c *Client) ResolveChannel(ctx context.Context, spec string) (string, error
 		return s, nil
 	}
 	name := strings.TrimPrefix(s, "#")
+	if id := c.cachedChannelID(ctx, name); id != "" {
+		return id, nil
+	}
 
 	found := ""
 	scanned := 0
@@ -268,6 +287,28 @@ func (c *Client) ResolveChannel(ctx context.Context, spec string) (string, error
 				"  チャンネル ID（C… の形）を直接指定してください。", spec, scanned)
 	}
 	return "", fmt.Errorf("チャンネル %q が見つかりませんでした（slack channels -name %s で確認してください）", spec, name)
+}
+
+// cachedChannelID はキャッシュから name のチャンネル ID を引き、conversations.info で今もその名前かを確かめて返す。
+// 無い・確かめられない・名前が変わっていたら空を返す（呼び出し側は今どおり API で探す）。
+//
+// 🚨 確かめずに使わない。改名や名前の再利用があると、キャッシュの古い対応で別のチャンネルを読む。
+func (c *Client) cachedChannelID(ctx context.Context, name string) string {
+	chs, _, ok := c.channelCache.load("")
+	if !ok {
+		return ""
+	}
+	for _, ch := range chs {
+		if ch.Name != name {
+			continue
+		}
+		info, err := c.ChannelInfo(ctx, ch.ID)
+		if err != nil || info.Name != name {
+			return ""
+		}
+		return ch.ID
+	}
+	return ""
 }
 
 // looksLikeChannelID は Slack のチャンネル ID の形かを判定する。

@@ -18,7 +18,10 @@ const channelsHelp = `slack channels - チャンネル一覧を表示する（co
   -c, -columns <list>  表示カラム。既定: id,name,is_private,num_members,topic
   -no-header           ヘッダ行を出さない
   -n <数>              最大件数（既定 0=全件）
+  -refresh             キャッシュを使わずに取り直す
   -json                JSON で出力
+
+全件の取得結果は 1 時間キャッシュする（-types・ユーザーごと。使ったときは stderr に 1 行出る）。
 
 指定可能なカラム:
   id / name / is_private / is_archived / num_members / topic / purpose
@@ -33,7 +36,7 @@ const channelsHelp = `slack channels - チャンネル一覧を表示する（co
 func cmdChannels(args []string) error {
 	var cfg config.Config
 	var types, nameFilter, columnsSpec string
-	var noHeader bool
+	var noHeader, refresh bool
 	var limit int
 
 	fs := newFlagSet("channels")
@@ -44,6 +47,7 @@ func cmdChannels(args []string) error {
 	fs.StringVar(&columnsSpec, "c", channelColumns.Defaults(), "-columns の別名")
 	fs.BoolVar(&noHeader, "no-header", false, "ヘッダ行を出力しない")
 	fs.IntVar(&limit, "n", 0, "最大件数（0=全件）")
+	fs.BoolVar(&refresh, "refresh", false, "キャッシュを使わずに取り直す")
 	if done, err := parseArgs(fs, channelsHelp, args); err != nil || done {
 		return err
 	}
@@ -60,6 +64,7 @@ func cmdChannels(args []string) error {
 	if err != nil {
 		return err
 	}
+	useChannelCache(sess, refresh)
 	// 名前フィルタがあるときは全件取ってから絞る（API 側に部分一致の絞り込みが無い）。
 	fetch := limit
 	if nameFilter != "" {

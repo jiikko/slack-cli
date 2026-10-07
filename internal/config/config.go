@@ -382,13 +382,25 @@ func ValidateWorkspace(ws string) error {
 
 // --- 自動検出結果のキャッシュ（cwd 非依存: 設定ディレクトリ配下） ---
 
-func profileCachePath(workspace string) (string, error) {
+// CacheDir は自動検出結果やチャンネル一覧のキャッシュを置くディレクトリ（設定ディレクトリの cache/、0700）を作って返す。
+//
+// 🚨 ~/Library/Caches/slack-cli/ には置かない。その下の extract/ は Cookie の一時コピーの作業領域で、
+// 起動時の掃除（auth.SweepStaleTempDirs）が走る（issue 007）。
+func CacheDir() (string, error) {
 	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
 	cacheDir := filepath.Join(dir, "cache")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", err
+	}
+	return cacheDir, nil
+}
+
+func profileCachePath(workspace string) (string, error) {
+	cacheDir, err := CacheDir()
+	if err != nil {
 		return "", err
 	}
 	return filepath.Join(cacheDir, "profile-"+workspace), nil
