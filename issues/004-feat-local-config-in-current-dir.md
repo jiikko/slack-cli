@@ -98,6 +98,23 @@ auth.test の照合も通り、`other` が読まれる。`profile` を書けば�
 - `slack config get` はローカルと共通を合わせた実効値を返す
 - `slack config path` はローカル設定があればそのパスも出す（出し方は実装時に決める）
 
+### help・メッセージの修正箇所（2026-10-07 に grep で列挙）
+
+`config.yml` / `優先順位` を grep して、利用者に見える文言を挙げた。どれもローカル設定と `-local` を反映する。
+
+| 箇所 | 今の文言 | 直す内容 |
+|---|---|---|
+| `cmd/slack/config_cmd.go` の `configHelp` | 場所は config.yml だけ / 優先順位にローカルが無い / `path`・`get` は「config.yml の」 | `.slack-cli.yml`（カレントディレクトリだけ・キーごとに上書き）の説明を足す。優先順位にローカルを入れる。`set -local` の使い方と例、`get` は合わせた実効値を返すこと、`path` の出力を書く。ローカル設定を使うと stderr に通知が出ることも書く |
+| 同 `config set` の引数エラー（`使い方: slack config set …`） | `-local` が無い | `slack config set [-local] <key> <値>` にする |
+| `cmd/slack/main.go` の `commonOptionsHelp` | `-workspace` の説明が「config.yml の workspace でも可」 / 優先順位にローカルが無い | 「.slack-cli.yml / config.yml の workspace でも可」と、ローカル入りの優先順位にする（全サブコマンドの help がここを使う） |
+| `cmd/slack/main.go` の `registerCommon` のフラグの説明（`-workspace`） | `config.yml workspace` | ローカル設定も書く |
+| `cmd/slack/search.go` の `-n` の説明 | 「既定は config.yml の default_count」 | ローカル設定も書く |
+| `cmd/slack/setup.go` の `setupHelp` | 「config.yml に保存する」 | 共通の config.yml に保存し、`-local` は無いこと、ローカル設定があるディレクトリでは保存した値がそちらに隠れうることを書く |
+| `cmd/slack/main.go` の `topUsage` の `config` 行 | 「設定ファイル（config.yml）」 | 1 行のままローカル設定も含む表現にする。root には優先順位などの詳細を書かない（`help_layout_test.go` の `TestTopUsageIsSummaryOnly` が守る） |
+| `internal/slack/resolve.go` のプロファイル固定時のエラー | 「-profile / config.yml で固定されているため」 | どの設定元で固定されたか（フラグ / 環境変数 / ローカル / 共通）を出す |
+
+- help の文言は `help_layout_test.go` に「`commonOptionsHelp` と `configHelp` が `.slack-cli.yml` に触れている」検査を足して固定する
+
 ### 変えないもの
 
 - 自動検出したプロファイルのキャッシュ（`profileCachePath`。`internal/slack/resolve.go` が読み書きする）は workspace ごとのキーなので変更しない
@@ -126,7 +143,8 @@ auth.test の照合も通り、`other` が読まれる。`profile` を書けば�
 - [ ] シンボリックリンク / 所有者が自分でない / グループか他人が書き込めるローカル設定は無視され、警告が出る（`-local` の書き込みも行わない）
 - [ ] グループか他人が書き込めるカレントディレクトリではローカル設定を読まない
 - [ ] ローカル設定を使ったことが stderr に出て、stdout（`-json` を含む）には出ない
-- [ ] README の「設定ファイル」節、`slack config --help`、package doc と `main.go` の冒頭コメントを新しい方針に合わせる
+- [ ] 「help・メッセージの修正箇所」の表の全行を直し、`help_layout_test.go` の検査で固定する
+- [ ] README の「設定ファイル」節、package doc と `main.go` の冒頭コメントを新しい方針に合わせる
 
 ## 関連ファイル
 
