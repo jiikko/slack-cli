@@ -28,10 +28,11 @@ const maxResponseBytes = 32 * 1024 * 1024
 // Client は https://<workspace>.slack.com/api/ だけを叩くクライアント。
 type Client struct {
 	http      *http.Client
-	workspace string // acme
-	host      string // acme.slack.com
-	token     string // xoxc-…
-	cookie    string // d cookie の値（xoxd-…）
+	workspace string       // acme
+	host      string       // acme.slack.com
+	token     string       // xoxc-…
+	cookie    string       // d cookie の値（xoxd-…）
+	retry     *RetryBudget // nil なら 429 で待たない（retry.go の WithRetry）
 }
 
 // Option は Client の組み立てオプション（テストでの差し替え用）。
@@ -236,7 +237,7 @@ func (c *Client) do(ctx context.Context, m Method, params url.Values) (json.RawM
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, &APIError{Method: m.name, Code: "invalid_auth"}
 	case http.StatusTooManyRequests:
-		return nil, fmt.Errorf("レート制限（429）: %s。%s待って再実行してください", m.name, retryAfterText(resp.Header.Get("Retry-After")))
+		return nil, newRateLimitError(m.name, resp.Header.Get("Retry-After"))
 	default:
 		return nil, fmt.Errorf("予期しないステータス %d（%s）", resp.StatusCode, m.name)
 	}
@@ -261,7 +262,7 @@ func (c *Client) do(ctx context.Context, m Method, params url.Values) (json.RawM
 
 // call は do を呼び、結果を v へデコードする。
 func (c *Client) call(ctx context.Context, m Method, params url.Values, v any) (json.RawMessage, error) {
-	raw, err := c.do(ctx, m, params)
+	raw, err := c.callRetrying(ctx, m, params)
 	if err != nil {
 		return nil, err
 	}

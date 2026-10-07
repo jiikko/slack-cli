@@ -89,6 +89,9 @@ func Resolve(ctx context.Context, cfg config.Config, creds Credentials, stderr i
 		profileFixed: strings.TrimSpace(cfg.Profile) != "" && cfg.Profile != auth.ProfileAuto,
 	}
 
+	// 429 で待つ上限は Resolve 1 回で 1 つ（全候補のクライアントで共有する）。opts を後ろに置くのはテストで差し替えるため。
+	clientOpts := append([]Option{WithRetry(NewRetryBudget(stderr))}, opts...)
+
 	for _, profile := range profiles {
 		cookie, err := creds.Cookie(profile, host)
 		if err != nil {
@@ -111,7 +114,7 @@ func Resolve(ctx context.Context, cfg config.Config, creds Credentials, stderr i
 		}
 
 		for _, token := range tokens {
-			c, err := New(ws, token, cookie, opts...)
+			c, err := New(ws, token, cookie, clientOpts...)
 			if err != nil {
 				fi.lastErr = err
 				continue
