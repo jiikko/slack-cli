@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -10,23 +12,29 @@ import (
 	"github.com/jiikko/slack-cli/internal/output"
 )
 
-const configHelp = `slack config - 設定ファイル(config.yml)を表示・編集する
+const configHelp = `slack config - 設定ファイル（config.yml / .slack-cli.yml）を表示・編集する
 
-config.yml の場所: $XDG_CONFIG_HOME/slack-cli/config.yml（未設定なら ~/.config/slack-cli/config.yml）
+共通の設定:   $XDG_CONFIG_HOME/slack-cli/config.yml（未設定なら ~/.config/slack-cli/config.yml）
+ローカル設定: カレントディレクトリの .slack-cli.yml（あれば読み込まれる。親ディレクトリはさかのぼらない）
+              書いてあるキーだけが config.yml より優先される（書いていないキーは config.yml の値）。
+              workspace / profile がそこで決まったときは stderr に 1 行出る。シンボリックリンク・自分以外が所有・グループか他人が
+              書き込めるファイルとディレクトリは無視する（警告を出す）。
 設定できるキー: workspace（別名 team） / profile / default_count
-優先順位: コマンドラインフラグ > 環境変数 > config.yml > 組み込み既定
+優先順位: コマンドラインフラグ > 環境変数 > .slack-cli.yml > config.yml > 組み込み既定
 
 使い方:
-  slack config              現在の有効な設定と、その出所（flag/env/file/default）を表示
-  slack config path         config.yml のパスを表示
-  slack config set <k> <v>  キーを設定して保存（例: slack config set workspace acme）
-  slack config get <k>      config.yml のキーの値を表示
-  slack config init         ログイン済みのワークスペース/プロファイルを自動検出して保存
+  slack config                    現在の有効な設定と、その出所（env/file:<パス>/default）を表示
+  slack config path [-local]      config.yml のパスを表示（-local: カレントディレクトリの .slack-cli.yml のパス）
+  slack config set [-local] <k> <v>
+                                  キーを設定して config.yml に保存（-local: .slack-cli.yml に指定したキーだけを保存）
+  slack config get <k>            キーの有効な値（.slack-cli.yml と config.yml を合わせた値）を表示
+  slack config init               ログイン済みのワークスペース/プロファイルを自動検出して config.yml に保存
 
 例:
   slack config set workspace acme
   slack config set profile "Profile 3"
   slack config set default_count 50
+  slack config set -local workspace other   # このディレクトリでだけ other を読む
   slack config init
 `
 
@@ -37,15 +45,16 @@ func cmdConfig(args []string) error {
 	}
 	switch sub {
 	case "", "show":
-		return configShow()
-	case "path":
-		p, err := config.Path()
-		if err != nil {
+		if err := checkLocalConfig(); err != nil {
 			return err
 		}
-		fmt.Println(p)
-		return nil
+		return configShow()
+	case "path":
+		return configPath(args[1:])
 	case "get":
+		if err := checkLocalConfig(); err != nil {
+			return err
+		}
 		if len(args) < 2 {
 			return &config.UsageError{Msg: "エラー: キー名を指定してください。\n使い方: slack config get <workspace|profile|default_count>"}
 		}
@@ -56,13 +65,7 @@ func cmdConfig(args []string) error {
 		fmt.Println(v)
 		return nil
 	case "set":
-		if err := refuseWriteIfBroken(); err != nil {
-			return err
-		}
-		if len(args) < 3 {
-			return &config.UsageError{Msg: "エラー: キーと値を指定してください。\n使い方: slack config set <workspace|profile|default_count> <値>\n例:     slack config set workspace acme"}
-		}
-		return configSet(args[1], args[2])
+		return configSet(os.Stdout, os.Stderr, args[1:])
 	case "init":
 		return configInit(args[1:])
 	case "-h", "--help", "help":
@@ -71,6 +74,29 @@ func cmdConfig(args []string) error {
 	default:
 		return &config.UsageError{Msg: fmt.Sprintf("エラー: 不明なサブコマンド %q\n%s", sub, configHelp)}
 	}
+}
+
+func configPath(args []string) error {
+	fs := newFlagSet("config path")
+	local := fs.Bool("local", false, "カレントディレクトリの .slack-cli.yml のパスを表示する")
+	if done, err := parseArgs(fs, configHelp, args); err != nil || done {
+		return err
+	}
+	// 🚨 -local なしの出力は config.yml のパス 1 行のまま変えない（$(slack config path) で使われる）。
+	if *local {
+		p := config.LocalPath()
+		if p == "" {
+			return fmt.Errorf("カレントディレクトリを特定できません")
+		}
+		fmt.Println(p)
+		return nil
+	}
+	p, err := config.Path()
+	if err != nil {
+		return err
+	}
+	fmt.Println(p)
+	return nil
 }
 
 func configShow() error {
@@ -90,7 +116,16 @@ func configShow() error {
 		note = "  (未作成)"
 	}
 	fmt.Printf("config file: %s%s\n", path, note)
+	switch {
+	case config.LocalIgnored() != "":
+		fmt.Printf("local file:  %s  (無視: %s)\n", config.LocalPath(), config.LocalIgnored())
+	case config.LocalPresent():
+		fmt.Printf("local file:  %s\n", config.LocalPath())
+	}
 	fmt.Println("有効な設定（コマンドラインフラグ指定時はそれが最優先）:")
+	wsSrc = fileSource(wsSrc, "workspace")
+	profileSrc = fileSource(profileSrc, "profile")
+	countSrc = fileSource(countSrc, "default_count")
 	if ws == "" {
 		ws, wsSrc = "(未設定)", "none"
 	}
@@ -127,6 +162,44 @@ func refuseWriteIfBroken() error {
 			"  ファイルを直すか削除してから、もう一度実行してください: %s", err, path)}
 }
 
+// ignoreLocalDefaults は、config.yml に保存するコマンド（config init / setup）で、フラグで明示されていない
+// workspace / profile の初期値からローカル設定を外す（環境変数 > config.yml > 既定 に戻す）。
+//
+// 🚨 外さないと、cd した先の .slack-cli.yml（clone した repo の作者が書いたもの）の値が、検出を飛ばして
+// そのまま config.yml に書き写され、どのディレクトリでも効く値になる。
+func ignoreLocalDefaults(fs *flag.FlagSet, cfg *config.Config) {
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	g := config.GlobalFile()
+	if !explicit["workspace"] && !explicit["w"] {
+		cfg.Workspace = config.ResolveDefault(config.EnvWorkspace, mustGet(g, "workspace"), "")
+	}
+	if !explicit["profile"] {
+		cfg.Profile = config.ResolveDefault(config.EnvProfile, g.Profile, config.DefaultProfile)
+	}
+}
+
+// fileSource は出所 "file" を、どのファイルかが分かる "file:<パス>" にする。
+func fileSource(src, key string) string {
+	if src != "file" {
+		return src
+	}
+	if p := config.Origin(key); p != "" {
+		return "file:" + p
+	}
+	return src
+}
+
+// warnShadowed は、config.yml に保存したキーがこのディレクトリではローカル設定に隠れるなら警告する。
+func warnShadowed(w io.Writer, keys ...string) {
+	for _, k := range keys {
+		if config.LocalHas(k) {
+			fmt.Fprintf(w, "警告: ローカル設定 %s に %s が書いてあるため、このディレクトリでは保存した値より %s の値が優先されます。\n",
+				config.LocalPath(), k, config.LocalName)
+		}
+	}
+}
+
 // mustGet は config.Get の値だけを取り出す（キーは定数なのでエラーは起きない）。
 func mustGet(fc config.File, key string) string {
 	v, err := config.Get(fc, key)
@@ -136,7 +209,44 @@ func mustGet(fc config.File, key string) string {
 	return v
 }
 
-func configSet(key, value string) error {
+// configSet は config set [-local] <key> <value> を実行する。
+//
+// -local のときはローカル設定単体の内容だけを読んで書く（共通の config.yml の値を写さない）。
+// 共通の config.yml が壊れていても -local は書ける（ローカルしか読み書きしないため）。
+func configSet(stdout, stderr io.Writer, args []string) error {
+	fs := newFlagSet("config set")
+	local := fs.Bool("local", false, "カレントディレクトリの .slack-cli.yml に保存する")
+	if done, err := parseArgs(fs, configHelp, args); err != nil || done {
+		return err
+	}
+	rest := fs.Args()
+	if err := checkNoTrailingFlags(fs, rest); err != nil {
+		return err
+	}
+	if !*local {
+		if err := refuseWriteIfBroken(); err != nil {
+			return err
+		}
+	}
+	if len(rest) < 2 {
+		return &config.UsageError{Msg: "エラー: キーと値を指定してください。\n使い方: slack config set [-local] <workspace|profile|default_count> <値>\n例:     slack config set workspace acme"}
+	}
+	key, value := rest[0], rest[1]
+
+	if *local {
+		fc := config.LocalFile()
+		if err := config.Set(&fc, key, value); err != nil {
+			return &config.UsageError{Msg: "エラー: " + err.Error()}
+		}
+		path, err := config.SaveLocal(fc)
+		if err != nil {
+			return err
+		}
+		saved, _ := config.Get(fc, key)
+		fmt.Fprintf(stdout, "%s に保存しました: %s = %s\n", path, key, saved)
+		return nil
+	}
+
 	fc := config.GlobalFile()
 	if err := config.Set(&fc, key, value); err != nil {
 		return &config.UsageError{Msg: "エラー: " + err.Error()}
@@ -146,7 +256,8 @@ func configSet(key, value string) error {
 	}
 	path, _ := config.Path()
 	saved, _ := config.Get(fc, key)
-	fmt.Printf("%s に保存しました: %s = %s\n", path, key, saved)
+	fmt.Fprintf(stdout, "%s に保存しました: %s = %s\n", path, key, saved)
+	warnShadowed(stderr, key)
 	return nil
 }
 
@@ -163,6 +274,7 @@ func configInit(args []string) error {
 	if done, err := parseArgs(fs, configHelp, args); err != nil || done {
 		return err
 	}
+	ignoreLocalDefaults(fs, &cfg)
 	// 検出・接続の前に断る（接続してから保存で失敗すると、確認 1 回分が無駄になる）。
 	if err := refuseWriteIfBroken(); err != nil {
 		return err
@@ -214,6 +326,7 @@ func configInit(args []string) error {
 	}
 	path, _ := config.Path()
 	fmt.Printf("%s に保存しました: workspace = %s / profile = %s\n", path, sess.Client.Workspace(), sess.Profile)
+	warnShadowed(os.Stderr, "workspace", "profile")
 	fmt.Printf("接続確認: %s (%s)\n", sess.Auth.Team, sess.Auth.User)
 	return nil
 }

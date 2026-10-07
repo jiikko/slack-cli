@@ -141,23 +141,23 @@ auth.test の照合も通り、`other` が読まれる。`profile` を書けば�
 
 ## 受け入れ条件
 
-- [ ] 共通の config.yml が壊れているとき、`config init` / `setup` は書き込みを拒否する
-- [ ] ローカル設定があるディレクトリでは、ローカル側の `workspace` が使われる
-- [ ] 親ディレクトリにある `.slack-cli.yml` は読まれない
-- [ ] ローカルに無いキーは共通側の値になる
-- [ ] ローカルの `team:` が共通の `workspace:` より優先される
-- [ ] フラグと環境変数は今どおりローカルより優先される
-- [ ] `slack config` に、どの値がどのファイルから来たかが出る
-- [ ] `-local` を付けない `config set` は共通の config.yml に書き、ローカル設定のファイルは変わらない。ローカルで上書きされているキーなら警告が出る
-- [ ] `slack config set -local workspace foo` を実行すると `./.slack-cli.yml` に `workspace: foo` だけが書かれ、共通の config.yml は変わらない
-- [ ] 共通の config.yml だけが壊れているとき、`config set -local` は書ける
-- [ ] ローカルのファイルが壊れているとき、読み込みは警告を出して止まり、`config set` / `config set -local` は拒否する
-- [ ] シンボリックリンク / 所有者が自分でない / グループか他人が書き込めるローカル設定は無視され、警告が出る（`-local` の書き込みも行わない）
-- [ ] グループか他人が書き込めるカレントディレクトリではローカル設定を読まない
-- [ ] ローカル設定を使ったことが stderr に出て、stdout（`-json` を含む）には出ない
-- [ ] 「help・メッセージの修正箇所」の表の全行を直し、`help_layout_test.go` の検査で固定する
-- [ ] 「README の修正箇所」の表の全行を直す（ローカル設定があれば読み込まれることが「設定ファイル」節に書いてある）
-- [ ] package doc と `main.go` の冒頭コメントを新しい方針に合わせる
+- [x] 共通の config.yml が壊れているとき、`config init` / `setup` は書き込みを拒否する
+- [x] ローカル設定があるディレクトリでは、ローカル側の `workspace` が使われる
+- [x] 親ディレクトリにある `.slack-cli.yml` は読まれない
+- [x] ローカルに無いキーは共通側の値になる
+- [x] ローカルの `team:` が共通の `workspace:` より優先される
+- [x] フラグと環境変数は今どおりローカルより優先される
+- [x] `slack config` に、どの値がどのファイルから来たかが出る
+- [x] `-local` を付けない `config set` は共通の config.yml に書き、ローカル設定のファイルは変わらない。ローカルで上書きされているキーなら警告が出る
+- [x] `slack config set -local workspace foo` を実行すると `./.slack-cli.yml` に `workspace: foo` だけが書かれ、共通の config.yml は変わらない
+- [x] 共通の config.yml だけが壊れているとき、`config set -local` は書ける
+- [x] ローカルのファイルが壊れているとき、読み込みは警告を出して止まり、`config set` / `config set -local` は拒否する
+- [x] シンボリックリンク / 所有者が自分でない / グループか他人が書き込めるローカル設定は無視され、警告が出る（`-local` の書き込みも行わない）
+- [x] グループか他人が書き込めるカレントディレクトリではローカル設定を読まない
+- [x] ローカル設定で workspace / profile が決まったことが stderr に出て、stdout（`-json` を含む）には出ない（default_count だけのときは出さない。下の「実装時の判断」）
+- [x] 「help・メッセージの修正箇所」の表の全行を直し、`help_layout_test.go` の検査で固定する
+- [x] 「README の修正箇所」の表の全行を直す（ローカル設定があれば読み込まれることが「設定ファイル」節に書いてある）
+- [x] package doc と `main.go` の冒頭コメントを新しい方針に合わせる
 
 ## 関連ファイル
 
@@ -187,4 +187,45 @@ codex は利用上限のため使えず、観点を分けた読み取り専用�
   - [x] 対応方針 1: `fix(config): config init / setup も壊れた config.yml を上書きしない`。`refuseWriteIfBroken` に寄せ、
     config set / config init / setup の入口で呼ぶ（検出・接続の前）。回帰テスト `TestBrokenConfigIsNotOverwrittenByAnyWriter`。
     変異検証（`mutate-verify`）: init / setup の呼び出しをそれぞれ外すと、該当のサブテストだけが red
-  - [ ] 対応方針 2〜4
+  - [x] 対応方針 2: `refactor(config): Load を書き込み用の GlobalFile と表示用の Effective に分ける`（挙動は変えない。Load を消してコンパイラに呼び出し側を挙げさせた）
+  - [x] 対応方針 3・4: `feat(config): カレントディレクトリの .slack-cli.yml を config.yml より優先して読む`
+    - 読み込み・検査・書き込みは `internal/config/local.go`（`readLocal` / `SaveLocal` / `LocalNotice` / `Origin`）。
+      壊れたローカル設定の検査は `parseArgs` の中（フラグ解析の後）と、フラグの無い `config` / `config get`
+    - 変異検証: `mutate-verify-list` で計 27 本（初回 13 本 + 追加 1 本・1 周目の修正 9 本・2 周目の修正 4 本）。26 本が想定どおり red。
+      緑のまま通った 1 本（`LocalNotice` の環境変数の確認を外す変異）は、値の一致の確認と重複していたので確認ごと消した
+    - 実バイナリの確認（HOME / XDG / cwd を scratchpad に隔離）: set / set -local / config / get / path -local / 上書きの警告が stderr だけに出る /
+      `whoami -json` で通知が stderr だけに出る / 壊れたローカル設定で rc=2・`--help` は rc=0 / シンボリックリンクは無視して書き込みも断る
+    - 手元の Go 1.26 と CI と同じ Go 1.25 で `go test ./...` が緑
+
+### 敵対的レビュー（実装、opus。2026-10-07）
+
+codex は利用上限のため使えず、opus のサブエージェントで代替した。1 周目は観点を分けた 3 体（壊す / 素通り / 回帰）、2・3 周目は直した差分だけを 1 体で攻めた。
+
+- 1 周目 採用（6 件）: config init / setup がローカルの workspace / profile を初期値にして config.yml へ書き写す（→ `ignoreLocalDefaults`）/
+  祖先に実行権限が無いと、ローカル設定が無いのに全コマンドが止まる（実測。→ 相対パス `LocalName` で開く）/ 他人が書き込めるディレクトリの
+  読めないファイルで止まる（→ ディレクトリの検査を open より前に）/ ローカルの `default_count: -5` の出所表示と上書きの警告が食い違う
+  （→ 判定を `File.count()` に寄せた）/ `search -- -h` で help 扱いになり検査を抜ける / config.yml の見出しから「必須」が消えた
+- 2 周目 採用（2 件）: `channels -name -h`（値の位置の -h）で検査を抜ける（実測）。自前の引数走査 `isHelpRequest` が flag の解析を真似きれず
+  2 周続けて破られたので、走査をやめ、本物のフラグ解析の後ろ（`parseArgs`）で検査する形にした / cwd に r だけで x が無いと黙ってローカル設定を
+  捨てる（→ 「調べられない」として警告して無視）。配線テストは、結果で return している呼び出しだけを数える形にした
+- 3 周目: P1・P2 なし。P3 2 件 — 配線テストの `config get` 用ルールが位置の比較として効いていなかった（→ ルールを消し、挙動のテスト
+  `TestBrokenLocalStopsCommands` が固定していることをコメントに残した）/ 自分のディレクトリでも中を調べられなければ警告して続行する（下の判断）
+- 却下・記録のみ:
+  - `slack config` の出所が `(file)` から `(file:<パス>)` に変わる — 仕様どおり（どのファイルかを出すのが目的）。出力を解析しているスクリプトは要更新
+  - `config set profile -local`（値がフラグ名と同じ）が「フラグは引数より前に」のエラーになる — `-local` を後ろに置いた書き間違いを
+    共通側へ書かないための検査の副作用。値が `-local` の profile は実在しない前提で受け入れる
+  - `config set -local` で書き直すと手で書いたコメントと未知のキーが消える — config.yml の `Save` と同じ挙動。README に注記した
+  - 🚨 未確認リスク: ローカル設定の `profile` にパス（`../../x`）を書くと、Chrome のプロファイルとして別の場所を読ませられる可能性
+    （`chromecookie.ProfileDir` は `filepath.Join` のまま）。config.yml・フラグ・環境変数にも前からある経路で、Cookie の復号には利用者の
+    Keychain の鍵が要るため悪用できるかは未確認。推測で防御を足さない。再評価の trigger: プロファイルのデータを鍵なしで読む経路を足すとき
+
+### 実装時の判断（issue の仕様から決めた・変えたもの）
+
+- `slack config path` の出力は config.yml のパス 1 行のまま変えず、`config path -local` でローカル設定のパスを出す（`$(slack config path)` を壊さない）
+- プロファイル固定時のエラー（`internal/slack/resolve.go` の `profileScopeNote`）は、どの設定元で固定されたかを出す代わりに、候補（-profile /
+  環境変数 / .slack-cli.yml / config.yml）を並べて「`slack config` で確認できる」と案内する。設定元を接続処理まで運ぶ配線を足さないため
+- `LocalNotice` は workspace / profile だけを通知する（読む対象・使うアカウントを変えるものだけ）。help・README もそう書いた
+- カレントディレクトリの中を調べられない（`Lstat` が ENOENT 以外で失敗）ときは、警告を出して無視し、続行する。ファイルがあるかどうか自体が
+  分からず、止める側に倒すとそのディレクトリでは全コマンドが使えなくなるため。自分のファイルなのに開けない・YAML が壊れているときは止める
+- 実バイナリの確認で、HOME を差し替えても `whoami` は Keychain の読み出しまで進むことを確認した（Keychain は HOME でなくユーザー単位）。
+  テストは Chrome の走査で止まる形にしてあり、Keychain に届かない

@@ -21,7 +21,7 @@ const searchHelp = `slack search - メッセージを検索する（search.messa
 オプション:
   -c, -columns <list>  表示カラム（カンマ区切り）。既定: datetime,channel,user,text
   -no-header           ヘッダ行を出さない（awk -F'\t' 等でパースしやすい）
-  -n <数>              取得件数（既定は config.yml の default_count、未設定なら 20）
+  -n <数>              取得件数（既定は .slack-cli.yml・config.yml の default_count、未設定なら 20）
   -page <数>           ページ番号（既定 1）
   -in <channel>        チャンネル絞り込み（クエリに in:#channel を付ける）
   -from <user>         投稿者絞り込み（クエリに from:@user を付ける）

@@ -39,3 +39,19 @@ func TestSubcommandHelpsCarryCommonDetails(t *testing.T) {
 		}
 	}
 }
+
+// help がローカル設定（.slack-cli.yml）と、その優先順位を説明していること。
+// config.yml だけを案内すると、ローカル設定で値が変わった理由を help から辿れない。
+func TestHelpsMentionLocalConfig(t *testing.T) {
+	for name, h := range map[string]string{"共通オプション": commonOptionsHelp, "slack config --help": configHelp} {
+		if !strings.Contains(h, ".slack-cli.yml") {
+			t.Errorf("%s が .slack-cli.yml に触れていない", name)
+		}
+		if !strings.Contains(h, "環境変数 > .slack-cli.yml") {
+			t.Errorf("%s の優先順位にローカル設定が入っていない", name)
+		}
+	}
+	if !strings.Contains(configHelp, "set [-local]") {
+		t.Error("slack config --help に set -local の使い方が無い")
+	}
+}

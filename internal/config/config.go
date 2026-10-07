@@ -1,7 +1,8 @@
-// Package config は ~/.config/slack-cli/config.yml の読み書きと、
-// 「コマンドラインフラグ > 環境変数 > config.yml > 組み込み既定」の優先順位解決を担う。
+// Package config は設定ファイルの読み書きと、
+// 「コマンドラインフラグ > 環境変数 > ローカル .slack-cli.yml > 共通 config.yml > 組み込み既定」の優先順位解決を担う。
 //
-// パスはすべて HOME / XDG 基準で解決し、カレントディレクトリに一切依存しない。
+// 共通の config.yml は HOME / XDG 基準で解決する。カレントディレクトリに依存するのはローカル設定
+// （local.go の LocalName）だけで、読むのはカレントディレクトリの 1 ファイルに限る。
 package config
 
 import (
@@ -38,6 +39,18 @@ type File struct {
 	Team         string `yaml:"team,omitempty"`
 	Profile      string `yaml:"profile,omitempty"`
 	DefaultCount int    `yaml:"default_count,omitempty"`
+}
+
+// count は default_count の実効値を返す（0 以下は未設定として 0）。
+//
+// 🚨 「設定されているか」の判定はここだけで行う（Get・Effective・LocalHas / Origin が使う）。
+// 別々に書くと、ローカルの default_count: -5 で値は共通側から取るのに出所はローカルと表示する、
+// のように食い違う。
+func (f File) count() int {
+	if f.DefaultCount > 0 {
+		return f.DefaultCount
+	}
+	return 0
 }
 
 // workspaceValue は workspace / team の別名を吸収した実効値を返す。
@@ -89,7 +102,8 @@ type layer struct {
 
 var (
 	loadOnce sync.Once
-	global   layer // 共通の config.yml
+	global   layer      // 共通の config.yml
+	local    localLayer // カレントディレクトリの .slack-cli.yml
 )
 
 // ResetCache は読み込みのキャッシュを捨てる。テストで設定ディレクトリを差し替えた後に呼ぶ
@@ -97,11 +111,16 @@ var (
 func ResetCache() {
 	loadOnce = sync.Once{}
 	global = layer{}
+	local = localLayer{}
 }
 
 func load() {
 	loadOnce.Do(func() {
 		global = readGlobal()
+		local = readLocal()
+		if local.ignored != "" {
+			fmt.Fprintf(os.Stderr, "警告: ローカル設定 %s を無視しました（%s）\n", local.path, local.ignored)
+		}
 	})
 }
 
@@ -140,9 +159,29 @@ func GlobalFile() File {
 }
 
 // Effective は設定ファイルから決まる実効値を返す（環境変数・フラグは含まない）。表示と既定値の解決に使う。
+// ローカル設定に書いてあるキーだけが共通の config.yml を上書きする。
 func Effective() File {
 	load()
-	return global.file
+	out := File{
+		Workspace:    global.file.workspaceValue(),
+		Profile:      global.file.Profile,
+		DefaultCount: global.file.count(),
+	}
+	if !local.present {
+		return out
+	}
+	// team → workspace の別名はファイルごとに解いてから合わせる（ローカルの team: は共通の workspace: に勝つ）。
+	if v := local.file.workspaceValue(); v != "" {
+		out.Workspace = v
+	}
+	if v := local.file.Profile; v != "" {
+		out.Profile = v
+	}
+	// 0 以下は未設定として共通側へ落とす（負の値で共通の値を隠し、組み込み既定へ落ちることを起こさない）。
+	if v := local.file.count(); v > 0 {
+		out.DefaultCount = v
+	}
+	return out
 }
 
 // Save は config.yml を書き出す（ディレクトリごと作成）。
@@ -154,6 +193,22 @@ func Save(fc File) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	data, err := marshalFile(fc, globalHeader)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "config.yml")
+	return os.WriteFile(path, data, 0o600)
+}
+
+// globalHeader は共通の config.yml を書き出すときの見出し。
+const globalHeader = "# slack-cli 設定ファイル（slack config set で更新できます）\n" +
+	"# workspace:     対象ワークスペースのサブドメイン（https://<workspace>.slack.com）。必須\n" +
+	"# profile:       使用する Chrome プロファイル名（auto でログイン済みを自動検出）\n" +
+	"# default_count: 検索・取得の既定件数\n"
+
+// marshalFile は設定ファイルの中身（見出し + YAML）を作る。
+func marshalFile(fc File, header string) ([]byte, error) {
 	// team は別名なので workspace へ正規化してから書く（両方が残ると出典が二重になる）。
 	if fc.Workspace == "" && fc.Team != "" {
 		fc.Workspace = fc.Team
@@ -162,24 +217,19 @@ func Save(fc File) error {
 
 	data, err := yaml.Marshal(fc)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	header := "# slack-cli 設定ファイル（slack config set で更新できます）\n" +
-		"# workspace:     対象ワークスペースのサブドメイン（https://<workspace>.slack.com）。必須\n" +
-		"# profile:       使用する Chrome プロファイル名（auto でログイン済みを自動検出）\n" +
-		"# default_count: 検索・取得の既定件数\n"
-	path := filepath.Join(dir, "config.yml")
-	return os.WriteFile(path, append([]byte(header), data...), 0o600)
+	return append([]byte(header), data...), nil
 }
 
-// ResolveDefault は「環境変数 > config.yml > 組み込み既定」の順で既定値を決める。
+// ResolveDefault は「環境変数 > 設定ファイル（Effective） > 組み込み既定」の順で既定値を決める。
 // これを flag の既定値に使うことで、-flag 明示指定が最優先になる（flag > env > file > 既定）。
 func ResolveDefault(envKey, fileVal, builtin string) string {
 	v, _ := ResolveDefaultSource(envKey, fileVal, builtin)
 	return v
 }
 
-// ResolveDefaultSource は値とその出所（env:KEY / file / default）を返す。
+// ResolveDefaultSource は値とその出所（env:KEY / file / default）を返す。file がどのファイルかは Origin で引く。
 func ResolveDefaultSource(envKey, fileVal, builtin string) (value, source string) {
 	if envKey != "" {
 		if v := os.Getenv(envKey); v != "" {
@@ -192,7 +242,7 @@ func ResolveDefaultSource(envKey, fileVal, builtin string) (value, source string
 	return builtin, "default"
 }
 
-// ResolveDefaultInt は数値項目の「環境変数 > config.yml > 既定」。
+// ResolveDefaultInt は数値項目の「環境変数 > 設定ファイル > 既定」。
 // 環境変数が数値として読めない場合は無視して次の候補へ落ちる。
 func ResolveDefaultInt(envKey string, fileVal, builtin int) (value int, source string) {
 	if envKey != "" {
@@ -208,7 +258,7 @@ func ResolveDefaultInt(envKey string, fileVal, builtin int) (value int, source s
 	return builtin, "default"
 }
 
-// Defaults は現在の config.yml / 環境変数から、各項目の既定値を返す。
+// Defaults は現在の設定ファイル（ローカル + 共通）/ 環境変数から、各項目の既定値を返す。
 func Defaults() (workspace, profile string, count int) {
 	fc := Effective()
 	workspace = ResolveDefault(EnvWorkspace, fc.workspaceValue(), "")
@@ -236,7 +286,7 @@ func IsKey(key string) bool {
 	return false
 }
 
-// Get は config.yml 上の値を文字列で返す。
+// Get は File 上の値を文字列で返す。
 func Get(fc File, key string) (string, error) {
 	switch key {
 	case "workspace", "team":
@@ -244,10 +294,10 @@ func Get(fc File, key string) (string, error) {
 	case "profile":
 		return fc.Profile, nil
 	case "default_count":
-		if fc.DefaultCount == 0 {
+		if fc.count() == 0 {
 			return "", nil
 		}
-		return strconv.Itoa(fc.DefaultCount), nil
+		return strconv.Itoa(fc.count()), nil
 	default:
 		return "", fmt.Errorf("不明なキー %q（指定可能: %s）", key, strings.Join(Keys, ", "))
 	}

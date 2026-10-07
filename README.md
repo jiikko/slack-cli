@@ -60,7 +60,7 @@ slack config         # 現在の設定と、その出所を表示
 
 ### 設定ファイル
 
-`$XDG_CONFIG_HOME/slack-cli/config.yml`（未設定なら `~/.config/slack-cli/config.yml`）
+共通の設定は `$XDG_CONFIG_HOME/slack-cli/config.yml`（未設定なら `~/.config/slack-cli/config.yml`）。
 
 ```yaml
 workspace: acme       # 必須。https://<workspace>.slack.com の <workspace>
@@ -68,11 +68,33 @@ profile: auto         # Chrome プロファイル名。auto で自動検出
 default_count: 20     # 検索・取得の既定件数
 ```
 
-優先順位は **コマンドラインフラグ > 環境変数 > config.yml > 既定値**。
+**カレントディレクトリに `.slack-cli.yml` があれば読み込まれ、書いてあるキーが config.yml より優先される。**
+ディレクトリごとに別のワークスペースを読みたいときに使う。
+
+```yaml
+# ./.slack-cli.yml — このディレクトリでだけ other を読む（profile / default_count は config.yml の値のまま）
+workspace: other
+```
+
+- 見るのはカレントディレクトリだけ（親ディレクトリはさかのぼらない）
+- キーごとに上書きする。書いていないキーは config.yml の値になる。書式は config.yml と同じ
+- `slack config set -local <key> <値>` で書ける（指定したキーだけを書く。ファイルを書き直すので手で書いたコメントは消える）。
+  `slack config path -local` でパスを出す
+- workspace / profile がローカル設定で決まったときは stderr に 1 行（`ローカル設定 … を使用: workspace=…`）出る。
+  stdout（`-json` を含む）には出さない。default_count だけのときは出ない
+- シンボリックリンク・自分以外が所有・グループか他人が書き込めるファイル、およびグループか他人が書き込める
+  ディレクトリ（`/tmp` 直下など）に置かれたものは無視する（警告を出す）
+- 自分のファイルなのに読めない・YAML として壊れているときは、help 以外のコマンドは止まる
+  （ローカル設定を捨てて config.yml の値で動くことはしない）
+- `slack setup` / `slack config init` は config.yml に保存する（`-local` は無い）。ローカル設定の値は初期値に使わない
+  （cd した先の `.slack-cli.yml` の値が config.yml に書き写されないように）
+
+優先順位は **コマンドラインフラグ > 環境変数 > `.slack-cli.yml` > config.yml > 既定値**。
 環境変数は `SLACK_CLI_WORKSPACE` / `SLACK_CLI_CHROME_PROFILE` / `SLACK_CLI_TOKEN`。
+`slack config` で、各値がどのファイル（またはどの環境変数）から来たかを確認できる。
 
 > `workspace` は `team` という別名でも読める。保存時は `workspace` に正規化される。
-> **資格情報（cookie / トークン）は config.yml に保存しない**（保存するキーも用意していない）。
+> **資格情報（cookie / トークン）は config.yml / `.slack-cli.yml` に保存しない**（保存するキーも用意していない）。
 
 ## コマンド
 
@@ -130,6 +152,9 @@ Slack の内部 API を叩くには 2 つの資格情報が要る。どちらも
    その workspace と一致したものだけを採用し、一致しなければ停止する。
    `-token` で明示指定したトークンも同じ検証を通る（フラグ 1 つで無効化できない）。
    リダイレクトは一切追わない。
+   「設定した workspace」にはローカル設定（`.slack-cli.yml`）も含まれる。clone した repo などに置かれた
+   `.slack-cli.yml` で、読む対象のワークスペースや使う Chrome プロファイルは変わりうる（接続先が
+   `*.slack.com` の外へ出ることはない）。通知は stderr の 1 行だけで、ディレクトリを信頼するかの確認は無い。
 2. **読み取り専用 allowlist** — 呼べるメソッドは型で閉じてあり、allowlist 外は
    **呼び出しコードがコンパイルできない**。加えて送信直前にも名前を突き合わせる。
 3. **資格情報を残さない** — cookie / トークンの生値は表示も保存もしない（表示はマスクのみ）。
@@ -173,7 +198,7 @@ chromecookie 側の `mutation_check.py` にある。
 cmd/slack/              サブコマンド分岐・フラグ・出力
 internal/auth/          d cookie の選択 / xoxc 抽出 / ワークスペース検出（Cookie 復号と後始末は chromecookie に委譲）
 internal/slack/         HTTP クライアント（allowlist・ワークスペース限定）/ API ラッパ / 接続解決
-internal/config/        config.yml の読み書きと優先順位解決
+internal/config/        config.yml / .slack-cli.yml の読み書きと優先順位解決
 internal/output/        TSV / JSON 整形
 ```
 

@@ -5,8 +5,8 @@
 // 副作用のある API は実装しない（internal/slack/method.go の allowlist を参照）。
 //
 // 認証: Chrome の Cookie（d）を Keychain 経由で復号し、Local Storage から xoxc トークンを
-// 取り出す。トークンの手動管理は不要。パスはすべて HOME 基準で解決し、カレント
-// ディレクトリに一切依存しない。
+// 取り出す。トークンの手動管理は不要。パスは HOME 基準で解決する。カレントディレクトリに
+// 依存するのはローカル設定（.slack-cli.yml。internal/config/local.go）の読み書きだけ。
 package main
 
 import (
@@ -36,7 +36,7 @@ const topUsage = `slack - Slack ワークスペースを読む CLI（読み取�
   thread      スレッドの返信を出す
   users       ユーザーの一覧を出す
   whoami      接続中のユーザーとワークスペースを出す
-  config      設定ファイル（config.yml）を表示・編集する
+  config      設定ファイル（config.yml / .slack-cli.yml）を表示・編集する
   setup       対話式で初期設定する（ワークスペース・Chrome のプロファイル）
   help        このヘルプ
 
@@ -47,11 +47,12 @@ const topUsage = `slack - Slack ワークスペースを読む CLI（読み取�
 // commonOptionsHelp は Slack に問い合わせるサブコマンドの help に共通のオプションの説明（正本はここだけ）。
 const commonOptionsHelp = `
 共通オプション:
-  -workspace <name>  対象ワークスペースのサブドメイン。必須（` + config.EnvWorkspace + ` / config.yml の workspace でも可）
+  -workspace <name>  対象ワークスペースのサブドメイン。必須（` + config.EnvWorkspace + ` / .slack-cli.yml・config.yml の workspace でも可）
   -profile <name>    Chrome のプロファイル。既定 auto=自動検出（` + config.EnvProfile + `）
   -token <xoxc-...>  トークンを明示指定（` + config.EnvToken + `）。指定してもワークスペースの一致は検証する
   -json              JSON で出力
-  優先順位: コマンドラインフラグ > 環境変数 > config.yml > 既定（詳細は slack config --help）
+  優先順位: コマンドラインフラグ > 環境変数 > .slack-cli.yml（カレントディレクトリ） > config.yml > 既定
+            （詳細は slack config --help。.slack-cli.yml で workspace / profile が決まったときは stderr に 1 行出る）
 `
 
 // commonTailHelp は Slack に問い合わせるサブコマンドの help の末尾に付ける、終了コードと安全のための制約（正本はここだけ）。
@@ -121,6 +122,25 @@ func main() {
 	}
 }
 
+// checkLocalConfig は、カレントディレクトリのローカル設定が読めないなら止める。
+// 呼ぶのは parseArgs（フラグ解析が成功した後）と、フラグを持たない config / config get。
+//
+// 🚨 読めなかったローカル設定を黙って捨てて続行しない。共通の config.yml にある別のワークスペースで
+// 動いてしまい、利用者は「このディレクトリの設定で読んだ」と思ったまま別の結果を受け取る。
+//
+// 🚨 「help だけは通す」を、引数を自前で走査して判定しない。flag パッケージの解析（値を取るフラグが
+// 次の語を消費する等）を真似きれず、`channels -name -h` のように値の位置の -h で検査を抜けられた
+// （issue 004 の敵対的レビュー 2 周目）。本物の解析の結果（ErrHelp）で help を見分ける。
+func checkLocalConfig() error {
+	err := config.LocalProblem()
+	if err == nil {
+		return nil
+	}
+	return &config.UsageError{Msg: fmt.Sprintf(
+		"エラー: ローカル設定を読めないため中止しました。\n  %v\n"+
+			"  ファイルを直すか削除してから、もう一度実行してください: %s", err, config.LocalPath())}
+}
+
 // exitCodeFor はエラーから終了コードを決める（使い方の誤り=2 / 実行時=1）。
 func exitCodeFor(err error) int {
 	if err == nil {
@@ -134,10 +154,10 @@ func exitCodeFor(err error) int {
 }
 
 // registerCommon は全サブコマンド共通のフラグを登録する。
-// 既定値は「環境変数 > config.yml > 組み込み既定」で解決し、-flag 明示指定が最優先になる。
+// 既定値は「環境変数 > 設定ファイル（.slack-cli.yml > config.yml） > 組み込み既定」で解決し、-flag 明示指定が最優先になる。
 func registerCommon(fs *flag.FlagSet, cfg *config.Config) {
 	ws, profile, count := config.Defaults()
-	fs.StringVar(&cfg.Workspace, "workspace", ws, "対象ワークスペースのサブドメイン（必須）/ "+config.EnvWorkspace+" / config.yml workspace")
+	fs.StringVar(&cfg.Workspace, "workspace", ws, "対象ワークスペースのサブドメイン（必須）/ "+config.EnvWorkspace+" / .slack-cli.yml・config.yml の workspace")
 	fs.StringVar(&cfg.Workspace, "w", ws, "-workspace の別名")
 	fs.StringVar(&cfg.Profile, "profile", profile, "Chrome のプロファイル名。既定 auto（自動検出）/ "+config.EnvProfile)
 	fs.StringVar(&cfg.Token, "token", os.Getenv(config.EnvToken), "xoxc トークンを明示指定（任意）/ "+config.EnvToken)
@@ -163,7 +183,7 @@ func newFlagSet(name string) *flag.FlagSet {
 //
 //   - --help: 明示的な要求なので stdout へ出して正常終了する（パイプで読める）
 //   - フラグの誤り: usage は stderr（stdout に混ざるとパイプが壊れる）。rc=2
-//   - 正常: そのまま続行
+//   - 正常: カレントディレクトリのローカル設定が読めなければ止める（checkLocalConfig）。読めれば続行
 func parseArgs(fs *flag.FlagSet, help string, args []string) (helpRequested bool, err error) {
 	if e := fs.Parse(args); e != nil {
 		if errors.Is(e, flag.ErrHelp) {
@@ -172,6 +192,9 @@ func parseArgs(fs *flag.FlagSet, help string, args []string) (helpRequested bool
 		}
 		return false, &config.UsageError{Msg: fmt.Sprintf(
 			"エラー: %v\n使い方は  slack %s --help  を参照してください。", e, fs.Name())}
+	}
+	if err := checkLocalConfig(); err != nil {
+		return false, err
 	}
 	return false, nil
 }
@@ -205,7 +228,13 @@ func checkNoTrailingFlags(fs *flag.FlagSet, args []string) error {
 }
 
 // openSession は設定から接続を解決する（ワークスペース限定・allowlist は internal/slack 側）。
+//
+// ローカル設定で workspace / profile が決まったなら、ここで stderr に 1 行出す
+// （Slack に問い合わせるコマンドは全部ここを通る。stdout は -json の出力なので使わない）。
 func openSession(cfg config.Config) (*slack.Session, error) {
+	if n := config.LocalNotice(cfg.Workspace, cfg.Profile); n != "" {
+		fmt.Fprintln(os.Stderr, n)
+	}
 	return slack.Resolve(context.Background(), cfg, nil, os.Stderr)
 }
 

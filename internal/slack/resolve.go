@@ -233,7 +233,8 @@ func profileScopeNote(profiles []string, fixed bool) string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"\n  なお、探したのは Chrome プロファイル %q だけです（-profile / config.yml で固定されているため）。\n"+
+		"\n  なお、探したのは Chrome プロファイル %q だけです（-profile か、"+config.EnvProfile+" / .slack-cli.yml / config.yml の profile で固定されているため。\n"+
+			"  設定ファイルのどちらで固定されているかは  slack config  で確認できます）。\n"+
 			"  別のプロファイルにログインしているかもしれません。全プロファイルを探すには:\n"+
 			"    slack <コマンド> -profile auto ...     （その場限り）\n"+
 			"    slack config set profile auto          （恒久）\n"+

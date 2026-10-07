@@ -13,7 +13,10 @@ import (
 
 const setupHelp = `slack setup - 対話式セットアップウィザード
 
-Chrome のログイン状況から「対象ワークスペース」と「使用プロファイル」を決めて config.yml に保存する。
+Chrome のログイン状況から「対象ワークスペース」と「使用プロファイル」を決めて、共通の config.yml に保存する。
+ローカル設定（.slack-cli.yml）には書かず、初期値にも使わない（-local は無い。プロファイル名はマシンごとに違うため）。
+カレントディレクトリに .slack-cli.yml があり同じキーが書いてあると、そのディレクトリでは保存した値より
+.slack-cli.yml が優先される。
 検出はローカル（Chrome のデータ）だけで行い、接続はワークスペースを決めた後の確認 1 回だけ。
 
 使い方:
@@ -44,10 +47,11 @@ func promptDefault(r *bufio.Reader, label, def string) string {
 func cmdSetup(args []string) error {
 	var cfg config.Config
 	fs := newFlagSet("setup")
-	registerCommon(fs, &cfg) // 現在の既定（env/config.yml）を初期値として使う
+	registerCommon(fs, &cfg) // 現在の既定（env/設定ファイル）を初期値として使う
 	if done, err := parseArgs(fs, setupHelp, args); err != nil || done {
 		return err
 	}
+	ignoreLocalDefaults(fs, &cfg)
 	// 検出・接続の前に断る（最後に保存で失敗すると、対話と接続確認が無駄になる）。
 	if err := refuseWriteIfBroken(); err != nil {
 		return err
@@ -126,6 +130,7 @@ func cmdSetup(args []string) error {
 
 	fmt.Printf("\n保存しました: %s\n", path)
 	fmt.Printf("  workspace=%s  profile=%s\n", sess.Client.Workspace(), sess.Profile)
+	warnShadowed(os.Stderr, "workspace", "profile")
 	fmt.Printf("  接続確認: %s (%s)\n", sess.Auth.Team, sess.Auth.User)
 	fmt.Println("\n準備完了。次のように使えます:")
 	fmt.Println("  slack channels")
