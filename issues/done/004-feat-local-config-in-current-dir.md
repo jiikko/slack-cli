@@ -196,6 +196,8 @@ codex は利用上限のため使えず、観点を分けた読み取り専用�
     - 実バイナリの確認（HOME / XDG / cwd を scratchpad に隔離）: set / set -local / config / get / path -local / 上書きの警告が stderr だけに出る /
       `whoami -json` で通知が stderr だけに出る / 壊れたローカル設定で rc=2・`--help` は rc=0 / シンボリックリンクは無視して書き込みも断る
     - 手元の Go 1.26 と CI と同じ Go 1.25 で `go test ./...` が緑
+    - CI（macOS / Ubuntu）緑。ログで両ジョブの `internal/config` と `cmd/slack` のテストが走ったことを確認
+- 2026-10-07 完了。受け入れ条件はすべて満たした。リリース（tag・homebrew-tap の更新）はこの issue の範囲外で、まだ行っていない
 
 ### 敵対的レビュー（実装、opus。2026-10-07）
 
