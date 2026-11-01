@@ -6,10 +6,10 @@ github.com/google/pprof v0.0.0-20221118152302-e6195bd50e26 h1:Xim43kblpZXfIBQsbu
 github.com/google/pprof v0.0.0-20221118152302-e6195bd50e26/go.mod h1:dDKJzRmX4S37WGHujM7tX//fmj1uioxKzKxz3lo4HJo=
 github.com/google/uuid v1.3.0 h1:t6JiXgmwXMjEs8VusXIJk2BXHsn+wx8BZdTaoZ5fu7I=
 github.com/google/uuid v1.3.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/jiikko/dotfiles v0.0.0-20261101095146-849ed5a79ed1 h1:BPk6BMrOjFm7z8vlkGKbm/JewQcQGa3AclnYF8kG3jE=
-github.com/jiikko/dotfiles v0.0.0-20261101095146-849ed5a79ed1/go.mod h1:RSBbYW1pTZL9IjVyclfNkVnb47GYweBtGB9j8dXcrVc=
-github.com/jiikko/dotfiles/src/chromecookie v0.0.0-20261101095146-849ed5a79ed1 h1:s6Ws/B+72bSjhg4S7JbtwAG5D3/scP2tQZXHshZbp+M=
-github.com/jiikko/dotfiles/src/chromecookie v0.0.0-20261101095146-849ed5a79ed1/go.mod h1:pNyeBNX6YlkTQs2WbdY0K9PVYIggZG15xRkLhT2dBRI=
+github.com/jiikko/dotfiles/src/chromecookie v0.0.0-20261101103315-bafd5d219ef8 h1:ZUqDcs9Woj5Ls4MegJhXr74lGaElfb+eFSBmFpu/JXk=
+github.com/jiikko/dotfiles/src/chromecookie v0.0.0-20261101103315-bafd5d219ef8/go.mod h1:jXHYtnaiikAtbYlwsKHAb+D4gMUJW3zNjTAHadI6UMo=
+github.com/jiikko/dotfiles/src/testwait v0.0.0-20261101103228-d17e1488b625 h1:fXWbJGd9MgO4KIu7N4VoR0E0jAZK/3Up5ddeM+dsGRU=
+github.com/jiikko/dotfiles/src/testwait v0.0.0-20261101103228-d17e1488b625/go.mod h1:bwMg/F+1dVbf/yeoVXbp6S26KzAL92fOKOYMaMy4tH8=
 github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 h1:Z9n2FFNUXsshfwJMBgNA0RU6/i7WVaAegv3PtuIHPMs=
 github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51/go.mod h1:CzGEWj7cYgsdH8dAjBGEr58BoE7ScuLd+fwFZ44+/x8=
 github.com/mattn/go-isatty v0.0.16 h1:bq3VjFmv/sOjHtdEhmkEV4x1AJtvUvOJ2PFAZ5+peKQ=
