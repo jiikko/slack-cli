@@ -3,7 +3,7 @@ module github.com/jiikko/slack-cli
 go 1.25.0
 
 require (
-	github.com/jiikko/dotfiles/src/chromecookie v0.0.0-20260928152229-b141fab42cec
+	github.com/jiikko/dotfiles/src/chromecookie v0.0.0-20261101095146-849ed5a79ed1
 	gopkg.in/yaml.v3 v3.0.1
 )
 

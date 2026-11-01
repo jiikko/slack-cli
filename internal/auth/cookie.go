@@ -52,7 +52,7 @@ func SlackDCookie(profile, host string) (string, error) {
 
 // readDCookie は SlackDCookie の Keychain 以降（テストが実物の Keychain に触れずに通す）。
 func readDCookie(profile, host string, password []byte) (string, error) {
-	res, err := ws.ReadCookies(profile, password, slackCookieName)
+	res, err := ws.ReadCookiesForHost(profile, password, host, slackCookieName)
 	if err != nil {
 		if chromecookie.IsMissing(err) {
 			return "", fmt.Errorf("%w\n%s", err, profileHint)
