@@ -174,6 +174,43 @@ func TestHistoryAcceptsStringChannel(t *testing.T) {
 	}
 }
 
+// history の親が持つ reply_count / latest_reply を -json に残す (返信だけが新しいスレッドを見つける手がかり)。
+// 返信の無い発言には欄を出さない。
+func TestHistoryKeepsThreadActivity(t *testing.T) {
+	rt := &recordingTransport{handle: func(method string, form url.Values) (int, string) {
+		return 200, `{"ok":true,"messages":[` +
+			`{"ts":"1725000000.000200","text":"plain"},` +
+			`{"ts":"1725000000.000100","thread_ts":"1725000000.000100","text":"parent","reply_count":3,"latest_reply":"1725900000.000500"}]}`
+	}}
+	c := newTestClient(t, rt)
+	msgs, err := c.History(context.Background(), "C0123456789", 10, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("件数: %d", len(msgs))
+	}
+	if msgs[1].ReplyCount != 3 || msgs[1].LatestReply != "1725900000.000500" {
+		t.Errorf("親のスレッドの動きが落ちた: %+v", msgs[1])
+	}
+	parent, err := json.Marshal(msgs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"reply_count":3`, `"latest_reply":"1725900000.000500"`} {
+		if !strings.Contains(string(parent), want) {
+			t.Errorf("-json に %s が無い: %s", want, parent)
+		}
+	}
+	plain, err := json.Marshal(msgs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "reply_count") || strings.Contains(string(plain), "latest_reply") {
+		t.Errorf("返信の無い発言にスレッドの欄が出た: %s", plain)
+	}
+}
+
 // channel が文字列・オブジェクト・null 以外の形なら、黙って空にせず誤りにする。
 func TestMessageChannelRejectsOtherShapes(t *testing.T) {
 	var c MessageChannel

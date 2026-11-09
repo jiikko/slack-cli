@@ -33,15 +33,20 @@ type AuthTest struct {
 // channel は search.messages にはオブジェクトであり、history/replies には基本的に無い（呼び出し側で補う）。
 // history でも一部のメッセージは文字列で持つ（MessageChannel を参照）。
 type Message struct {
-	Type     string         `json:"type"`
-	User     string         `json:"user"`
-	Username string         `json:"username"`
-	BotID    string         `json:"bot_id"`
-	Ts       string         `json:"ts"`
-	ThreadTs string         `json:"thread_ts"`
-	Text     string         `json:"text"`
-	Perma    string         `json:"permalink"`
-	Channel  MessageChannel `json:"channel"`
+	Type     string `json:"type"`
+	User     string `json:"user"`
+	Username string `json:"username"`
+	BotID    string `json:"bot_id"`
+	Ts       string `json:"ts"`
+	ThreadTs string `json:"thread_ts"`
+	// ReplyCount / LatestReply は conversations.history がスレッドの親にだけ付ける。親が期間より古くても
+	// 返信が新しいスレッドを、replies を親ごとに呼ばずに見つけるのに使う。search と replies の応答には無いので
+	// omitempty にして、それらの -json の形を変えない。
+	ReplyCount  int            `json:"reply_count,omitempty"`
+	LatestReply string         `json:"latest_reply,omitempty"`
+	Text        string         `json:"text"`
+	Perma       string         `json:"permalink"`
+	Channel     MessageChannel `json:"channel"`
 	// ChannelID は history/replies のように channel が無いレスポンスで、
 	// 呼び出し側が引数のチャンネルを埋めるための欄。
 	//
