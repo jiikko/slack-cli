@@ -25,6 +25,8 @@ func TestMain(m *testing.M) {
 	retrySleep = func(context.Context, time.Duration) error {
 		panic("retrySleep を差し替えずに待ちへ入った（テストが実時間を待つ）")
 	}
+	// ページ送りを通る既存のテストは間を空ける待ちに入る。実時間を待たずに戻す（待ちを見るテストは fakePace で差し替える）
+	paceSleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	os.Exit(m.Run())
 }
 
@@ -46,10 +48,11 @@ func fakeSleep(t *testing.T) *[]time.Duration {
 
 // scriptTransport は呼び出しごとに決めた応答（status / Retry-After / 本文）を順に返す。尽きたら最後の応答を返し続ける。
 type scriptTransport struct {
-	mu    sync.Mutex
-	steps []scriptStep
-	calls int
-	forms []url.Values
+	mu     sync.Mutex
+	steps  []scriptStep
+	calls  int
+	forms  []url.Values
+	before func() // 応答を返す前に呼ぶ (リクエストにかかる時間を偽の時計で表す)。nil なら呼ばない
 }
 
 type scriptStep struct {
@@ -61,6 +64,9 @@ type scriptStep struct {
 func (st *scriptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	b, _ := io.ReadAll(req.Body)
 	form, _ := url.ParseQuery(string(b))
+	if st.before != nil {
+		st.before()
+	}
 	st.mu.Lock()
 	i := st.calls
 	if i >= len(st.steps) {
@@ -270,5 +276,78 @@ func TestResolveSharesRetryBudgetAcrossCandidates(t *testing.T) {
 	}
 	if total > defaultRetryTotal {
 		t.Errorf("候補をまたいだ待ちの合計 %v が上限 %v を超えた: %v", total, defaultRetryTotal, *waits)
+	}
+}
+
+// fakePace は間を空ける待ちを記録して時計をその分進める偽物と、偽の時計を挿し、記録 (0 より長い待ちだけ) と時計を返す。
+func fakePace(t *testing.T) (*[]time.Duration, *time.Time) {
+	t.Helper()
+	var waits []time.Duration
+	origSleep, origNow := paceSleep, paceNow
+	now := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	paceSleep = func(ctx context.Context, d time.Duration) error {
+		if d > 0 {
+			waits = append(waits, d)
+			now = now.Add(d)
+		}
+		return ctx.Err()
+	}
+	paceNow = func() time.Time { return now }
+	t.Cleanup(func() { paceSleep, paceNow = origSleep, origNow })
+	return &waits, &now
+}
+
+// 間は前の呼び出しの終わりから測る: 既に経った分は待たない。
+func TestPaceSubtractsElapsed(t *testing.T) {
+	waits, now := fakePace(t)
+	b := NewRetryBudget(nil)
+	b.called("conversations.list")
+	*now = now.Add(time.Second)
+	if err := b.pace(context.Background(), "conversations.list"); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(5 * time.Second)
+	if err := b.pace(context.Background(), "conversations.list"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []time.Duration{2 * time.Second}; fmt.Sprint(*waits) != fmt.Sprint(want) {
+		t.Errorf("待ち = %v, want %v (1 秒経っていれば残りの 2 秒、間より経っていれば待たない)", *waits, want)
+	}
+}
+
+// 同じメソッドを続けて呼ぶ (ページ送り) ときは、Slack の段に合わせて間を空ける。段の緩いメソッドと、別のメソッドの間は空けない。
+// 間を空けない Client (WithRetry なし) は今までどおり続けて打つ。
+func TestPaceSpacesPagesOfSameMethod(t *testing.T) {
+	waits, now := fakePace(t)
+	page := func(id, next string) scriptStep {
+		return scriptStep{status: 200, body: fmt.Sprintf(`{"ok":true,"channels":[{"id":%q,"name":%q}],"response_metadata":{"next_cursor":%q}}`, id, id, next)}
+	}
+	// リクエストに 1 秒かかる: 間は終わりから測るので、待ちは 3 秒のまま (始まりから測ると 2 秒になる)
+	st := &scriptTransport{steps: []scriptStep{okAuth(), okAuth(), page("C1", "c2"), page("C2", "c3"), page("C3", "")},
+		before: func() { *now = now.Add(time.Second) }}
+	c := retryClient(t, st, NewRetryBudget(nil))
+	for range 2 {
+		if _, err := c.AuthTest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*waits) != 0 {
+		t.Fatalf("auth.test (Tier 4) の間を空けた: %v", *waits)
+	}
+	if chs, err := c.Channels(context.Background(), "", 0); err != nil || len(chs) != 3 {
+		t.Fatalf("ページ送り: %d 件 %v", len(chs), err)
+	}
+	if want := []time.Duration{3 * time.Second, 3 * time.Second}; fmt.Sprint(*waits) != fmt.Sprint(want) {
+		t.Errorf("conversations.list (Tier 2) のページの間 = %v, want %v", *waits, want)
+	}
+
+	*waits = nil
+	plainSt := &scriptTransport{steps: []scriptStep{page("C1", "c2"), page("C2", "")}}
+	plain, err := New("alpha", "xoxc-test", "xoxd-test", WithHTTPClient(&http.Client{Transport: plainSt}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Channels(context.Background(), "", 0); err != nil || len(*waits) != 0 {
+		t.Errorf("WithRetry の無い Client が間を空けた: %v %v", *waits, err)
 	}
 }

@@ -75,6 +75,49 @@ type RetryBudget struct {
 	total       time.Duration
 	waited      time.Duration
 	notify      io.Writer // 待つことを知らせる先（stderr）。nil なら知らせない
+	// lastCall はメソッドごとの最後の呼び出しが終わった時刻（pace が間を空ける）
+	lastCall map[string]time.Time
+}
+
+// paceGap は同じメソッドを続けて呼ぶとき、前の呼び出しの終わりから空ける間。Slack の Web API のレート制限の段
+// （https://docs.slack.dev/apis/web-api/rate-limits）に合わせる: Tier 2 は 1 分に 20 回ほど、Tier 3 は 50 回ほど。
+// ページ送り（history・replies・conversations.list の cursor）を間を空けずに打つと、段の上限に当たって 429 を受ける（issue 006 の実測）。
+// 受けてから待つのでなく、先に間を空けて上限を超えない（Slack のレート制限の作法）。間は段の上限ちょうどで、余りは呼び出しにかかる時間の分だけ。
+// その分、ページの多い取得は遅くなる（conversations.list の 18 ページで待ちが約 51 秒。チャンネルの一覧は channelcache が覚えるので毎回ではない）。
+// 速さの前後は未実測。Tier 4 以上（auth.test・users.info）は空けない。
+// RetryBudget は Resolve の候補（別のトークン）で共有するので、候補をまたいでも同じメソッドの間を空ける。今の Resolve が候補ごとに呼ぶのは
+// auth.test（空けない）だけなので、候補を試す速さは変わらない。
+func paceGap(method string) time.Duration {
+	switch method {
+	case "search.messages", "search.modules", "conversations.list", "users.list", "emoji.list": // Tier 2
+		return 3 * time.Second
+	case "conversations.history", "conversations.replies", "conversations.info", "users.lookupByEmail", "team.info": // Tier 3
+		return 1200 * time.Millisecond
+	}
+	return 0
+}
+
+// paceSleep / paceNow は間を空ける待ちと時計。テストは差し替えて実時間を待たない。
+var (
+	paceSleep = retrySleep
+	paceNow   = time.Now
+)
+
+// pace は method の前の呼び出しの終わりから paceGap だけ空けてから戻る。
+func (b *RetryBudget) pace(ctx context.Context, method string) error {
+	last, ok := b.lastCall[method]
+	if !ok {
+		return nil
+	}
+	return paceSleep(ctx, last.Add(paceGap(method)).Sub(paceNow()))
+}
+
+// called は method の呼び出しが終わった時刻を覚える。
+func (b *RetryBudget) called(method string) {
+	if b.lastCall == nil {
+		b.lastCall = map[string]time.Time{}
+	}
+	b.lastCall[method] = paceNow()
 }
 
 // NewRetryBudget は既定の上限で RetryBudget を作る。notify には stderr を渡す（stdout は -json の出力なので使わない）。
@@ -87,8 +130,8 @@ func NewRetryBudget(notify io.Writer) *RetryBudget {
 	}
 }
 
-// WithRetry は 429 を受けたら Retry-After だけ待ってやり直すようにする。
-// 付けない Client は今までどおり 429 をそのまま返す（Resolve が付ける）。
+// WithRetry は 429 を受けたら Retry-After だけ待ってやり直し、同じメソッドを続けて呼ぶときは間を空ける（pace）ようにする。
+// 付けない Client は今までどおり 429 をそのまま返し、間も空けない（Resolve が付ける）。
 func WithRetry(b *RetryBudget) Option {
 	return func(c *Client) { c.retry = b }
 }
@@ -107,7 +150,15 @@ func (b *RetryBudget) take(e *RateLimitError, attempt int) bool {
 // 呼べるのは読み取り専用のメソッドだけ（allowlist）なので、同じリクエストをやり直しても副作用は無い。
 func (c *Client) callRetrying(ctx context.Context, m Method, params url.Values) (json.RawMessage, error) {
 	for attempt := 1; ; attempt++ {
+		if c.retry != nil {
+			if err := c.retry.pace(ctx, m.name); err != nil {
+				return nil, err
+			}
+		}
 		raw, err := c.do(ctx, m, params)
+		if c.retry != nil {
+			c.retry.called(m.name)
+		}
 		var rl *RateLimitError
 		if err == nil || c.retry == nil || !errors.As(err, &rl) || !c.retry.take(rl, attempt) {
 			return raw, err
